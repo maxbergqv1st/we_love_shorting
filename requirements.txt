@@ -1,0 +1,10 @@
+scikit-learn
+pandas
+numpy
+joblib
+streamlit
+
+# dev
+ruff
+pytest
+mypy
