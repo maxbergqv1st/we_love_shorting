@@ -14,15 +14,16 @@ from we_love_shorting import controller
 
 logging.basicConfig(level=logging.INFO)
 
-st.title("we_love_shorting — GDELT tone signal")
-st.caption("News tone about a topic → probability the index closes down tomorrow.")
+st.title("we_love_shorting — price → news-tone signal")
+st.caption("SPY + precious-metal prices → predicted news tone. Low tone = bearish.")
 
 query = st.text_input("GDELT query", "recession")
-symbol = st.text_input("Ticker", "SPY")
+spy_symbol = st.text_input("Index ticker", "SPY")
+metal_symbol = st.text_input("Precious-metal ticker", "GC=F")
 
 run = st.cache_data(ttl="1h")(controller.run)  # avoid re-hitting GDELT on every click
 
 if st.button("Run flow"):
-    df = run(query, symbol)
-    st.line_chart(df.set_index("date")[["tone", "short_prob"]])
+    df = run(query, spy_symbol, metal_symbol)
+    st.line_chart(df.set_index("date")[["tone", "predicted_tone"]])
     st.dataframe(df.tail(20), use_container_width=True)

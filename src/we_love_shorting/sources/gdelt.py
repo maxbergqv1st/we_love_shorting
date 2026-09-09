@@ -1,4 +1,4 @@
-"""Model / data layer: fetch GDELT tone + prices over HTTP (stdlib only)."""
+"""GDELT DOC 2.0 news tone (stdlib HTTP only). One source, one job."""
 
 import json
 import logging
@@ -44,16 +44,3 @@ def fetch_tone(query: str, timespan: str = "12m") -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df.rename(columns={"value": "tone"})[["date", "tone"]]
-
-
-def fetch_prices(symbol: str = "SPY", period: str = "1y") -> pd.DataFrame:
-    """Daily close from Yahoo Finance (free, no auth)."""
-    import yfinance as yf
-
-    log.info("yfinance fetch: %s (%s)", symbol, period)
-    df = yf.Ticker(symbol).history(period=period).reset_index()
-    if df.empty:
-        raise ValueError(f"no price data for ticker {symbol!r}")
-    df.columns = [c.lower() for c in df.columns]
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df[["date", "close"]]

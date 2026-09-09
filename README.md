@@ -1,23 +1,26 @@
 # we_love_shorting
-A small end-to-end ML project: does the **tone of the news** predict whether the
-stock market falls the next day? We pull daily news sentiment and daily stock
-prices, store them in a database, train a model, and show the result in a
-Streamlit dashboard.
+A small end-to-end ML project: do **market prices** predict the **tone of the
+news**? We pull two daily prices (the S&P 500 and a precious metal) plus daily
+news sentiment, store them in a database, train a model, and show the result in
+a Streamlit dashboard.
 
-> **Hypothesis:** when news about a topic (e.g. *"recession"*) turns more
-> negative, the chance that the market (SPY / S&P 500) closes down the next day
-> goes up. The model looks for that signal.
+> **Hypothesis:** the day's market prices — the S&P 500 (SPY) and a precious
+> metal (gold) — carry information about how negative the news is. The model
+> predicts the day's news **tone** from those two prices. A low predicted tone =
+> bearish sentiment = a shorting cue.
 
 ---
 
 ## How it fits together
 
+Each data source is its own process in its own module. They stay **separate**
+right up until `features.py`, where they meet and join on the date.
+
 ```
-                 sources.py                         db.py            signal_model.py        app.py
-  GDELT  ─────►  fetch_tone()   ─┐                                                          Streamlit
-  (news tone)                    ├─► save to ─► SQLite ─► load ─► train + predict ─────────► dashboard
-  Yahoo  ─────►  fetch_prices() ─┘   (shorting.db)         (model.joblib)
-  (stock price)
+  sources/gdelt.py   GDELT ───► fetch_tone()   ─┐  (target: news tone)
+  sources/yahoo.py   Yahoo ───► fetch_prices()  ├─► db.py ─► features.py ─► signal_model.py ─► app.py
+                     (SPY)                       │  SQLite    join on date   train + predict    Streamlit
+                     (gold GC=F)  fetch_prices() ┘           = the meeting     (model.joblib)   dashboard
 ```
 
 The code is split into small layers so anyone can work on one piece without
@@ -25,77 +28,61 @@ breaking the others:
 
 | File | Layer | Responsibility |
 |------|-------|----------------|
-| `sources.py` | data | Fetch news tone (GDELT) + prices (Yahoo) from the internet |
+| `sources/gdelt.py` | data | Fetch news tone (GDELT) — the target |
+| `sources/yahoo.py` | data | Fetch a price for any ticker (SPY, gold, …) |
 | `db.py` | database | Save/load tables to a local SQLite file |
-| `signal_model.py` | ML | Build features, train the model, predict |
-| `controller.py` | glue | Runs the whole flow: fetch → store → train → predict |
+| `features.py` | join | Where the streams **meet**: join on date, pick features + target |
+| `signal_model.py` | ML | Train the model, predict tone |
+| `controller.py` | glue | Runs the whole flow: fetch → store → join → train → predict |
 | `app.py` | UI | Streamlit dashboard (what you actually click on) |
 
 ---
 
-## Where the data comes from (two different sources)
+## Where the data comes from (three separate streams)
 
-The two datasets are fetched **separately** and only joined together later, on
-the date. That's why there are two tables in the database.
+The three streams are fetched **independently** and only joined together in
+`features.py`, on the date. That's why there are three tables in the database.
 
-### 1. News tone — GDELT
+### 1. News tone — GDELT (the target)
 [GDELT](https://gdeltproject.org/) monitors news media worldwide and computes an
 average **"tone"** score for articles matching a search term. We fetch it over
 plain HTTP (Python's built-in `urllib`, no library needed) in
-`sources.fetch_tone()`.
+`sources.gdelt.fetch_tone()`.
 
 - **`tone`** = sentiment of the day's news. Roughly ranges −10 (very negative) to
-  +10 (very positive); 0 is neutral.
+  +10 (very positive); 0 is neutral. This is what the model tries to predict.
 - GDELT rate-limits per IP, so we retry with backoff on HTTP 429.
 
-### 2. Stock prices — Yahoo Finance (`yfinance`)
-Prices come from **Yahoo Finance** via the [`yfinance`](https://pypi.org/project/yfinance/)
-library (a free, pip-installable package — no API key needed). It's imported in
-`sources.fetch_prices()`:
+### 2 & 3. Prices — Yahoo Finance (`yfinance`) (the two features)
+Both prices come from **Yahoo Finance** via the [`yfinance`](https://pypi.org/project/yfinance/)
+library (free, pip-installable, no API key). One function serves both feature
+streams — they differ only by ticker:
 
 ```python
 import yfinance as yf
 
-df = yf.Ticker("SPY").history(period="1y")  # -> pandas DataFrame
+yf.Ticker("SPY").history(period="1y")  # S&P 500 ETF
+yf.Ticker("GC=F").history(period="1y")  # gold futures (the precious metal)
 ```
 
-- **`close`** = the closing price of SPY (an ETF tracking the S&P 500), in USD,
-  at the end of each trading day.
-- We only keep the `date` and `close` columns.
-
-> To switch price source or ticker, you only edit `fetch_prices()` — nothing
-> else in the project knows where prices come from.
+- **`spy_close`** = daily closing price of SPY (tracks the S&P 500), USD.
+- **`metal_close`** = daily closing price of gold futures (`GC=F`), USD. Swap to
+  `SI=F` (silver), `GLD`, etc. — it's just a ticker in the dashboard.
+- We only keep the `date` and `close` columns from each.
 
 ---
 
 ## The database connection
 
-We use **SQLite** — a zero-setup database that lives in a single file,
-`data/shorting.db`. No server to install, no credentials. All DB access goes
-through `db.py`, which is tiny on purpose:
+We use **SQLite** — a zero-setup database in a single file, `data/shorting.db`.
+No server, no credentials. All DB access goes through `db.py`, which is tiny on
+purpose (`to_sql` writes a DataFrame, `read_sql` reads it back).
 
-```python
-import sqlite3, pandas as pd
-
-
-def _conn():
-    return sqlite3.connect("data/shorting.db")  # opens (or creates) the file
-
-
-def save(table, df):  # pandas -> a DB table
-    df.to_sql(table, _conn(), if_exists="replace", index=False)
-
-
-def load(table):  # a DB table -> pandas
-    return pd.read_sql(f"select * from {table}", _conn())
-```
-
-- pandas does the heavy lifting: `to_sql` writes a DataFrame straight into a
-  table, `read_sql` reads it back.
-- Two tables get created: **`tone`** (date, tone) and **`prices`** (date, close).
-- The database also acts as a **cache**: if the internet fetch fails (e.g. GDELT
-  rate-limits us), `controller.run()` falls back to the last data stored in the
-  DB instead of crashing.
+- Three tables get created: **`tone`** (date, tone), **`spy`** (date, close) and
+  **`metal`** (date, close).
+- The database also acts as a **cache**: if a fetch fails (e.g. GDELT rate-limits
+  us), `controller.run()` falls back to the last data stored in the DB instead of
+  crashing.
 - Want a real server DB later? Swap only `_conn()` (e.g. to Postgres). The rest
   of the code doesn't change.
 
@@ -108,9 +95,12 @@ we never commit it.
 
 ```
 src/we_love_shorting/
-  sources.py        # fetch GDELT tone + Yahoo prices
+  sources/
+    gdelt.py        # fetch GDELT news tone (the target)
+    yahoo.py        # fetch a price for any ticker (SPY, gold, …)
   db.py             # SQLite save/load
-  signal_model.py   # features, train, predict
+  features.py       # the meeting point: join streams on date, features + target
+  signal_model.py   # train, predict tone
   controller.py     # orchestrates the flow
 app.py              # Streamlit dashboard
 tests/              # pytest
@@ -127,12 +117,12 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 streamlit run app.py        # opens the dashboard in your browser
-pytest                      # run the tests (PYTHONPATH=src)
+PYTHONPATH=src pytest       # run the tests
 ```
 
-In the dashboard: type a GDELT query (e.g. `recession`) and a ticker (e.g.
-`SPY`), hit **Run flow**, and you get a chart of tone vs. the model's
-`short_prob` — the estimated probability the market closes down tomorrow.
+In the dashboard: type a GDELT query (e.g. `recession`), an index ticker (e.g.
+`SPY`) and a precious-metal ticker (e.g. `GC=F`), hit **Run flow**, and you get a
+chart of the actual `tone` vs. the model's `predicted_tone`.
 
 ---
 
@@ -141,5 +131,7 @@ In the dashboard: type a GDELT query (e.g. `recession`) and a ticker (e.g.
 - The model currently trains and predicts on the same data, so the accuracy
   numbers aren't trustworthy yet — the goal right now is to prove the **flow**
   works end to end. A proper time-based train/test split is the next step.
-- The signal is at index level (news tone about a term → SPY), not per-company;
-  mapping tone to individual tickers is GDELT's weak spot.
+- Prices and tone are used **same-day** (contemporaneous), so this measures
+  association, not a forecast. Lagging the features is the next step.
+- News tone is at index/term level, not per-company — mapping tone to individual
+  tickers is GDELT's weak spot.

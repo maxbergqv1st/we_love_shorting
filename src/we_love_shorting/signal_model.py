@@ -1,31 +1,22 @@
-"""Model / ML layer: tone-based classifier for next-day down-moves (short signal)."""
+"""ML layer: regress news tone on the two daily prices. Low predicted tone =
+bearish sentiment = a shorting cue. Swap LinearRegression to classify instead."""
 
 from pathlib import Path
 
 import joblib
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from .features import FEATURES, TARGET
+
 MODEL_PATH = Path("data/model.joblib")
-FEATURES = ["tone", "tone_ma3"]
-
-
-def build_features(tone: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
-    """Join tone+price by date; target = next day closes down (a shorting chance)."""
-    df = prices.merge(tone, on="date", how="inner").sort_values("date")
-    df["ret"] = df["close"].pct_change()
-    df["tone_ma3"] = df["tone"].rolling(3).mean()
-    next_ret = df["ret"].shift(-1)
-    # NaN target on the last row (no next day yet) so dropna removes it, not a fake 0
-    df["target"] = (next_ret < 0).astype(int).where(next_ret.notna())
-    return df.dropna().reset_index(drop=True)
 
 
 def train(df: pd.DataFrame) -> Pipeline:
-    model = make_pipeline(StandardScaler(), LogisticRegression())
-    model.fit(df[FEATURES], df["target"])
+    model = make_pipeline(StandardScaler(), LinearRegression())
+    model.fit(df[FEATURES], df[TARGET])
     MODEL_PATH.parent.mkdir(exist_ok=True)
     joblib.dump(model, MODEL_PATH)
     return model
@@ -34,6 +25,4 @@ def train(df: pd.DataFrame) -> Pipeline:
 def predict(df: pd.DataFrame, model: Pipeline | None = None) -> pd.Series:
     if model is None:
         model = joblib.load(MODEL_PATH)
-    return pd.Series(
-        model.predict_proba(df[FEATURES])[:, 1], index=df.index, name="short_prob"
-    )
+    return pd.Series(model.predict(df[FEATURES]), index=df.index, name="predicted_tone")
