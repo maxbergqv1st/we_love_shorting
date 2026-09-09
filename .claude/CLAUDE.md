@@ -19,6 +19,7 @@ Complete AI/ML project end-to-end, three required parts:
 ## Shared conventions
 - Layout: `src/` package + `tests/`. Dependencies pinned in `requirements.txt`.
 - Tooling: `ruff` (lint + format), `pytest`, type hints checked with `mypy`; per-tool config added when a default falls short.
+- **Always ruff before calling code done:** run `ruff check --fix .` then `ruff format .` on any Python you write or edit, and confirm it passes, before reporting the work finished. Not optional.
 - Pin dependencies. `logging`, never `print`, in library code.
 - `.streamlit/secrets.toml` and real data files stay git-ignored.
 
