@@ -2,6 +2,9 @@
 
 Python 3.14 project (`.venv` present). ML shorting-signal model + Streamlit dashboard.
 
+## Base rule: NO REINVENTION
+Before writing new code, always look to **upgrade or tweak existing code** first. Grep the repo for a helper, pattern, or module that already does the job and extend it — reimplementing what already lives here (or in the stdlib / an installed dependency) is not allowed. New code is the last resort, after reuse has been ruled out.
+
 ## Project brief (graded group assignment)
 Complete AI/ML project end-to-end, three required parts:
 1. Store the data in a **database** (backend).

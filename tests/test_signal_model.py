@@ -10,6 +10,6 @@ def test_build_features_labels_next_day_down():
     )
     df = signal_model.build_features(tone, prices)
 
-    # first 2 rows drop (tone_ma3 NaN); kept closes 105,108,104 -> next-day up,down,(last NaN->0)
-    assert df["target"].tolist() == [0, 1, 0]
+    # rows 0-1 drop (tone_ma3 NaN), last row drops (no next day); kept closes 105,108 -> up,down
+    assert df["target"].tolist() == [0, 1]
     assert not df[signal_model.FEATURES].isna().any().any()

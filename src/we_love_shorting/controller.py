@@ -25,11 +25,12 @@ def run(query: str = "recession", symbol: str = "SPY") -> pd.DataFrame:
     except Exception as e:  # noqa: BLE001 - any fetch failure should fall back to cache
         try:
             db.load("tone")
+            db.load("prices")
         except Exception:  # noqa: BLE001 - no cache yet -> surface the original error
             raise RuntimeError(f"fetch failed and no cached data: {e}") from e
         log.warning("fetch failed (%s); using cached DB data", e)
 
     df = signal_model.build_features(db.load("tone"), db.load("prices"))
-    signal_model.train(df)
-    df["short_prob"] = signal_model.predict(df)
+    model = signal_model.train(df)
+    df["short_prob"] = signal_model.predict(df, model)
     return df

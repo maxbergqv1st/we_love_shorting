@@ -17,7 +17,9 @@ def build_features(tone: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
     df = prices.merge(tone, on="date", how="inner").sort_values("date")
     df["ret"] = df["close"].pct_change()
     df["tone_ma3"] = df["tone"].rolling(3).mean()
-    df["target"] = (df["ret"].shift(-1) < 0).astype(int)
+    next_ret = df["ret"].shift(-1)
+    # NaN target on the last row (no next day yet) so dropna removes it, not a fake 0
+    df["target"] = (next_ret < 0).astype(int).where(next_ret.notna())
     return df.dropna().reset_index(drop=True)
 
 
@@ -29,6 +31,7 @@ def train(df: pd.DataFrame) -> Pipeline:
     return model
 
 
-def predict(df: pd.DataFrame) -> pd.Series:
-    model = joblib.load(MODEL_PATH)
+def predict(df: pd.DataFrame, model: Pipeline | None = None) -> pd.Series:
+    if model is None:
+        model = joblib.load(MODEL_PATH)
     return pd.Series(model.predict_proba(df[FEATURES])[:, 1], index=df.index, name="short_prob")

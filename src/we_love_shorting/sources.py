@@ -38,7 +38,9 @@ def fetch_tone(query: str, timespan: str = "12m") -> pd.DataFrame:
     url = f"{GDELT_DOC}?{params}"
     log.info("GDELT fetch: %s", url)
     data = _get_json(url)
-    rows = data["timeline"][0]["data"]
+    rows = data.get("timeline", [{}])[0].get("data", [])
+    if not rows:
+        raise ValueError(f"GDELT returned no data for query {query!r}")
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df.rename(columns={"value": "tone"})[["date", "tone"]]
@@ -50,6 +52,8 @@ def fetch_prices(symbol: str = "SPY", period: str = "1y") -> pd.DataFrame:
 
     log.info("yfinance fetch: %s (%s)", symbol, period)
     df = yf.Ticker(symbol).history(period=period).reset_index()
+    if df.empty:
+        raise ValueError(f"no price data for ticker {symbol!r}")
     df.columns = [c.lower() for c in df.columns]
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df[["date", "close"]]
