@@ -1,0 +1,18 @@
+# venv
+.venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# streamlit secrets + real data
+.streamlit/secrets.toml
+data/
+*.csv
+*.parquet
+*.joblib
+*.pkl

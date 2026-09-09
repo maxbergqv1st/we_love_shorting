@@ -3,8 +3,8 @@
 Python 3.14 project (`.venv` present). ML shorting-signal model + Streamlit dashboard.
 
 ## Shared conventions
-- Layout: `src/` package + `tests/`. `pyproject.toml` is the single source of config.
-- Tooling: `ruff` (lint + format), `pytest`, type hints checked with `mypy`.
+- Layout: `src/` package + `tests/`. Dependencies pinned in `requirements.txt`.
+- Tooling: `ruff` (lint + format), `pytest`, type hints checked with `mypy`; per-tool config added when a default falls short.
 - Pin dependencies. `logging`, never `print`, in library code.
 - `.streamlit/secrets.toml` and real data files stay git-ignored.
 

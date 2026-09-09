@@ -1,10 +1,10 @@
-scikit-learn
-pandas
-numpy
-joblib
-streamlit
+scikit-learn==1.9.0
+pandas==3.0.5
+numpy==2.5.3
+joblib==1.6.0
+streamlit==1.63.0
 
 # dev
-ruff
-pytest
-mypy
+ruff==0.16.6
+pytest==9.1.1
+mypy==2.3.1
