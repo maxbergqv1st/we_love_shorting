@@ -34,4 +34,6 @@ def train(df: pd.DataFrame) -> Pipeline:
 def predict(df: pd.DataFrame, model: Pipeline | None = None) -> pd.Series:
     if model is None:
         model = joblib.load(MODEL_PATH)
-    return pd.Series(model.predict_proba(df[FEATURES])[:, 1], index=df.index, name="short_prob")
+    return pd.Series(
+        model.predict_proba(df[FEATURES])[:, 1], index=df.index, name="short_prob"
+    )

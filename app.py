@@ -4,7 +4,9 @@ import logging
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))  # ponytail: path shim, drop after `pip install -e .`
+sys.path.insert(
+    0, str(Path(__file__).parent / "src")
+)  # ponytail: path shim, drop after `pip install -e .`
 
 import streamlit as st
 

@@ -19,7 +19,7 @@ def _get_json(url: str, retries: int = 4) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": "we_love_shorting/0.1"})
     for attempt in range(retries):
         try:
-            with urllib.request.urlopen(req) as r:  # noqa: S310 - fixed https host
+            with urllib.request.urlopen(req) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code != 429 or attempt == retries - 1:

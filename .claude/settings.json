@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.py) .venv/bin/ruff check --fix \"$f\" >/dev/null 2>&1; .venv/bin/ruff format \"$f\" >/dev/null 2>&1 ;; esac"
+          }
+        ]
+      }
+    ]
+  }
+}

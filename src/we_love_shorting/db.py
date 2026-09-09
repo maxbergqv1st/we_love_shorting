@@ -20,4 +20,4 @@ def save(table: str, df: pd.DataFrame) -> None:
 
 def load(table: str) -> pd.DataFrame:
     with _conn() as c:
-        return pd.read_sql(f"select * from {table}", c)  # noqa: S608 - table is caller-controlled, not user input
+        return pd.read_sql(f"select * from {table}", c)
