@@ -38,7 +38,8 @@ def fetch_tone(query: str, timespan: str = "12m") -> pd.DataFrame:
     url = f"{GDELT_DOC}?{params}"
     log.info("GDELT fetch: %s", url)
     data = _get_json(url)
-    rows = data.get("timeline", [{}])[0].get("data", [])
+    timeline = data.get("timeline") or [{}]  # empty query result -> [] -> [{}]
+    rows = timeline[0].get("data", [])
     if not rows:
         raise ValueError(f"GDELT returned no data for query {query!r}")
     df = pd.DataFrame(rows)
