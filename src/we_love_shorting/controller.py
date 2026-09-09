@@ -28,7 +28,7 @@ def run(
         refresh(query, spy_symbol, metal_symbol)
     except Exception as e:  # noqa: BLE001 - any fetch failure should fall back to cache
         try:
-            db.load("tone"), db.load("spy"), db.load("metal")
+            db.load("tone")  # probe: raises if we have no cached data at all
         except Exception:  # noqa: BLE001 - no cache yet -> surface the original error
             raise RuntimeError(f"fetch failed and no cached data: {e}") from e
         log.warning("fetch failed (%s); using cached DB data", e)
