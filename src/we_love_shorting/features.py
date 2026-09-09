@@ -12,8 +12,7 @@ def build_features(
 ) -> pd.DataFrame:
     """Join by date: SPY close + precious-metal close predict that day's news tone."""
     df = (
-        spy.rename(columns={"close": "spy_close"})
-        .merge(metal.rename(columns={"close": "metal_close"}), on="date")
+        spy.merge(metal, on="date")
         .merge(tone, on="date")
         .sort_values("date")
         .dropna()

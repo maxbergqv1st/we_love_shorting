@@ -8,8 +8,14 @@ import pandas as pd
 log = logging.getLogger(__name__)
 
 
-def fetch_prices(symbol: str, period: str = "1y") -> pd.DataFrame:
-    """Daily close for any Yahoo ticker (SPY, GC=F gold, SI=F silver, ...)."""
+def fetch_prices(
+    symbol: str, period: str = "1y", value_col: str = "close"
+) -> pd.DataFrame:
+    """Daily close for any Yahoo ticker (SPY, GC=F gold, SI=F silver, ...).
+
+    `value_col` names the price column so each stream is distinct in the DB
+    (e.g. "spy_close" vs "metal_close") instead of a generic "close".
+    """
     import yfinance as yf
 
     log.info("yfinance fetch: %s (%s)", symbol, period)
@@ -18,4 +24,4 @@ def fetch_prices(symbol: str, period: str = "1y") -> pd.DataFrame:
         raise ValueError(f"no price data for ticker {symbol!r}")
     df.columns = [c.lower() for c in df.columns]
     df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df[["date", "close"]]
+    return df[["date", "close"]].rename(columns={"close": value_col})

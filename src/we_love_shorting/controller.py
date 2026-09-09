@@ -13,8 +13,8 @@ log = logging.getLogger(__name__)
 def refresh(query: str, spy_symbol: str, metal_symbol: str) -> None:
     """Pull each source into its own table (each commits only on success)."""
     db.save("tone", gdelt.fetch_tone(query))
-    db.save("spy", yahoo.fetch_prices(spy_symbol))
-    db.save("metal", yahoo.fetch_prices(metal_symbol))
+    db.save("spy", yahoo.fetch_prices(spy_symbol, value_col="spy_close"))
+    db.save("metal", yahoo.fetch_prices(metal_symbol, value_col="metal_close"))
 
 
 def run(
