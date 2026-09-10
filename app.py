@@ -26,4 +26,15 @@ run = st.cache_data(ttl="1h")(controller.run)  # avoid re-hitting GDELT on every
 if st.button("Run flow"):
     df = run(query, spy_symbol, metal_symbol)
     st.line_chart(df.set_index("date")[["tone", "predicted_tone"]])
-    st.dataframe(df, use_container_width=True)
+    styled = df.style.apply(
+        lambda row: (
+            ["background-color: #5a1f1f" if row["market_closed"] else ""] * len(row)
+        ),
+        axis=1,
+    )  # market_closed drives the row colour below; hidden from view via column_config
+    st.dataframe(
+        styled,
+        use_container_width=True,
+        column_config={"market_closed": None},  # None = hide, Styler still reads it
+    )
+    st.caption("🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används.")

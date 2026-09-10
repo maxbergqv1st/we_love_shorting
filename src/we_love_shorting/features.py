@@ -22,11 +22,17 @@ def build_features(
     # merge_asof needs datetime64 keys, not datetime.date objects.
     for frame in (prices, tone):
         frame["date"] = pd.to_datetime(frame["date"])
+    prices["market_date"] = prices[
+        "date"
+    ]  # survives asof to flag carried-forward closes
     df = (
         pd.merge_asof(tone, prices, on="date", direction="backward")
         .dropna()
         .reset_index(drop=True)
     )
+    # closed = price was carried forward from an earlier trading day (weekend/holiday)
+    df["market_closed"] = df["date"] != df["market_date"]
+    df = df.drop(columns="market_date")
     df["date"] = df["date"].dt.date
     if df.empty:
         raise ValueError("no overlapping dates across prices and tone")

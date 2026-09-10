@@ -31,3 +31,5 @@ def test_weekend_tone_kept_with_friday_close():
     assert df["tone"].tolist() == [1.0, 2.0, 3.0, 4.0]
     assert df["spy_close"].tolist() == [100, 100, 100, 108]
     assert df["metal_close"].tolist() == [2000, 2000, 2000, 2020]
+    # Sat/Sun flagged closed (carried-forward price); Fri/Mon are real trading days.
+    assert df["market_closed"].tolist() == [False, True, True, False]
