@@ -26,4 +26,4 @@ run = st.cache_data(ttl="1h")(controller.run)  # avoid re-hitting GDELT on every
 if st.button("Run flow"):
     df = run(query, spy_symbol, metal_symbol)
     st.line_chart(df.set_index("date")[["tone", "predicted_tone"]])
-    st.dataframe(df.tail(20), use_container_width=True)
+    st.dataframe(df, use_container_width=True)
