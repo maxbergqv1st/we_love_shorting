@@ -2,32 +2,25 @@
 
 import json
 import logging
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 import pandas as pd
 
+from ..retry import retry
+
 log = logging.getLogger(__name__)
 
 GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
 
 
-def _get_json(url: str, retries: int = 4) -> dict:
-    """GET JSON with backoff on 429 — GDELT rate-limits per IP."""
+@retry(times=4, exceptions=(urllib.error.HTTPError,))
+def _get_json(url: str) -> dict:
+    """GET JSON with backoff — GDELT rate-limits per IP with 429s."""
     req = urllib.request.Request(url, headers={"User-Agent": "we_love_shorting/0.1"})
-    for attempt in range(retries):
-        try:
-            with urllib.request.urlopen(req) as r:
-                return json.load(r)
-        except urllib.error.HTTPError as e:
-            if e.code != 429 or attempt == retries - 1:
-                raise
-            wait = 2**attempt
-            log.warning("GDELT 429, retrying in %ss", wait)
-            time.sleep(wait)
-    raise RuntimeError("unreachable")
+    with urllib.request.urlopen(req) as r:
+        return json.load(r)
 
 
 def fetch_tone(query: str, timespan: str = "12m") -> pd.DataFrame:
