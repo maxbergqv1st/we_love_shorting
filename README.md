@@ -102,10 +102,12 @@ src/we_love_shorting/
   features.py       # the meeting point: join streams on date, features + target
   signal_model.py   # train, predict tone
   controller.py     # orchestrates the flow
-app.py              # Streamlit dashboard
-tests/              # pytest
-requirements.txt    # pinned dependencies
-data/               # SQLite DB + saved model (git-ignored)
+app.py                 # Streamlit dashboard
+tests/                 # pytest
+requirements.txt       # pinned runtime dependencies
+requirements-dev.txt   # pinned dev tools (ruff, pytest, mypy)
+pyproject.toml         # packaging; dependencies read from the files above
+data/                  # SQLite DB + saved model (git-ignored)
 ```
 
 ---
@@ -113,12 +115,15 @@ data/               # SQLite DB + saved model (git-ignored)
 ## Run it
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+git clone <repo-url> && cd we_love_shorting
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"     # editable install; pulls runtime + dev deps
 
 streamlit run app.py        # opens the dashboard in your browser
-PYTHONPATH=src pytest       # run the tests
+pytest                      # run the tests
 ```
+
+Just want to run the app, no dev tools? `pip install -e .` (or `pip install -r requirements.txt`) is enough.
 
 In the dashboard: type a GDELT query (e.g. `recession`), an index ticker (e.g.
 `SPY`) and a precious-metal ticker (e.g. `GC=F`), hit **Run flow**, and you get a
