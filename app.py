@@ -28,7 +28,7 @@ if st.button("Run flow"):
     st.line_chart(df.set_index("date")[["tone", "predicted_tone"]])
     styled = df.style.apply(
         lambda row: (
-            ["background-color: #5a1f1f" if row["market_closed"] else ""] * len(row)
+            ["background-color: #5a1f1f" if row.get("market_closed") else ""] * len(row)
         ),
         axis=1,
     )  # market_closed drives the row colour below; hidden from view via column_config
