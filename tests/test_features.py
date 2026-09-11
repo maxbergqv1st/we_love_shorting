@@ -8,10 +8,11 @@ def test_build_features_joins_streams_and_targets_tone():
     tone = pd.DataFrame({"date": dates, "tone": [1.0, -2.0, 0.5, 3.0]})
     spy = pd.DataFrame({"date": dates, "spy_close": [100, 110, 105, 108]})
     metal = pd.DataFrame({"date": dates, "metal_close": [2000, 2010, 1990, 2020]})
+    oil = pd.DataFrame({"date": dates, "oil_close": [70, 72, 71, 73]})
 
-    df = features.build_features(tone, spy, metal)
+    df = features.build_features(tone, spy, metal, oil)
 
-    assert features.FEATURES == ["spy_close", "metal_close"]
+    assert features.FEATURES == ["spy_close", "metal_close", "oil_close"]
     assert features.TARGET == "tone"
     assert set(features.FEATURES + [features.TARGET]) <= set(df.columns)
     assert df["tone"].tolist() == [1.0, -2.0, 0.5, 3.0]
@@ -24,13 +25,15 @@ def test_weekend_tone_kept_with_friday_close():
     tone = pd.DataFrame({"date": [fri, sat, sun, mon], "tone": [1.0, 2.0, 3.0, 4.0]})
     spy = pd.DataFrame({"date": [fri, mon], "spy_close": [100, 108]})
     metal = pd.DataFrame({"date": [fri, mon], "metal_close": [2000, 2020]})
+    oil = pd.DataFrame({"date": [fri, mon], "oil_close": [70, 73]})
 
-    df = features.build_features(tone, spy, metal)
+    df = features.build_features(tone, spy, metal, oil)
 
     # All 4 tone days survive; Sat/Sun inherit Friday's close.
     assert df["tone"].tolist() == [1.0, 2.0, 3.0, 4.0]
     assert df["spy_close"].tolist() == [100, 100, 100, 108]
     assert df["metal_close"].tolist() == [2000, 2000, 2000, 2020]
+    assert df["oil_close"].tolist() == [70, 70, 70, 73]
     # Sat/Sun flagged closed (carried-forward price); Fri/Mon are real trading days.
     assert df["market_closed"].tolist() == [False, True, True, False]
 
@@ -41,7 +44,8 @@ def test_pending_weekday_close_not_flagged():
     tone = pd.DataFrame({"date": [thu, fri], "tone": [1.0, 2.0]})
     spy = pd.DataFrame({"date": [thu], "spy_close": [100]})
     metal = pd.DataFrame({"date": [thu], "metal_close": [2000]})
+    oil = pd.DataFrame({"date": [thu], "oil_close": [70]})
 
-    df = features.build_features(tone, spy, metal)
+    df = features.build_features(tone, spy, metal, oil)
 
     assert df["market_closed"].tolist() == [False, False]

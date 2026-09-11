@@ -10,22 +10,26 @@ from .sources import gdelt, yahoo
 log = logging.getLogger(__name__)
 
 
-def refresh(query: str, spy_symbol: str, metal_symbol: str) -> None:
+def refresh(query: str, spy_symbol: str, metal_symbol: str, oil_symbol: str) -> None:
     """Pull each source into its own table (each commits only on success)."""
     db.save("tone", gdelt.fetch_tone(query))
     db.save("spy", yahoo.fetch_prices(spy_symbol, value_col="spy_close"))
     db.save("metal", yahoo.fetch_prices(metal_symbol, value_col="metal_close"))
+    db.save("oil", yahoo.fetch_prices(oil_symbol, value_col="oil_close"))
 
 
 def run(
-    query: str = "recession", spy_symbol: str = "SPY", metal_symbol: str = "GC=F"
+    query: str = "recession",
+    spy_symbol: str = "SPY",
+    metal_symbol: str = "GC=F",
+    oil_symbol: str = "CL=F",
 ) -> pd.DataFrame:
     """Full flow: fetch -> store -> join -> train -> predict tone.
 
     Falls back to cached DB data if a fetch fails (e.g. GDELT rate-limits).
     """
     try:
-        refresh(query, spy_symbol, metal_symbol)
+        refresh(query, spy_symbol, metal_symbol, oil_symbol)
     except Exception as e:  # noqa: BLE001 - any fetch failure should fall back to cache
         try:
             db.load("tone")  # probe: raises if we have no cached data at all
@@ -33,7 +37,9 @@ def run(
             raise RuntimeError(f"fetch failed and no cached data: {e}") from e
         log.warning("fetch failed (%s); using cached DB data", e)
 
-    df = features.build_features(db.load("tone"), db.load("spy"), db.load("metal"))
+    df = features.build_features(
+        db.load("tone"), db.load("spy"), db.load("metal"), db.load("oil")
+    )
     model = signal_model.train(df)
     df["predicted_tone"] = signal_model.predict(df, model)
     return df

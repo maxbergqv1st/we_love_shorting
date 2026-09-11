@@ -1,13 +1,13 @@
 # we_love_shorting
 A small end-to-end ML project: do **market prices** predict the **tone of the
-news**? We pull two daily prices (the S&P 500 and a precious metal) plus daily
-news sentiment, store them in a database, train a model, and show the result in
-a Streamlit dashboard.
+news**? We pull three daily prices (the S&P 500, a precious metal, and crude
+oil) plus daily news sentiment, store them in a database, train a model, and
+show the result in a Streamlit dashboard.
 
-> **Hypothesis:** the day's market prices — the S&P 500 (SPY) and a precious
-> metal (gold) — carry information about how negative the news is. The model
-> predicts the day's news **tone** from those two prices. A low predicted tone =
-> bearish sentiment = a shorting cue.
+> **Hypothesis:** the day's market prices — the S&P 500 (SPY), a precious
+> metal (gold), and crude oil — carry information about how negative the news
+> is. The model predicts the day's news **tone** from those three prices. A low
+> predicted tone = bearish sentiment = a shorting cue.
 
 ---
 
@@ -20,7 +20,8 @@ right up until `features.py`, where they meet and join on the date.
   sources/gdelt.py   GDELT ───► fetch_tone()   ─┐  (target: news tone)
   sources/yahoo.py   Yahoo ───► fetch_prices()  ├─► db.py ─► features.py ─► signal_model.py ─► app.py
                      (SPY)                       │  SQLite    join on date   train + predict    Streamlit
-                     (gold GC=F)  fetch_prices() ┘           = the meeting     (model.joblib)   dashboard
+                     (gold GC=F)  fetch_prices() ┤           = the meeting     (model.joblib)   dashboard
+                     (oil CL=F)   fetch_prices() ┘
 ```
 
 The code is split into small layers so anyone can work on one piece without
@@ -38,10 +39,10 @@ breaking the others:
 
 ---
 
-## Where the data comes from (three separate streams)
+## Where the data comes from (four separate streams)
 
-The three streams are fetched **independently** and only joined together in
-`features.py`, on the date. That's why there are three tables in the database.
+The four streams are fetched **independently** and only joined together in
+`features.py`, on the date. That's why there are four tables in the database.
 
 ### 1. News tone — GDELT (the target)
 [GDELT](https://gdeltproject.org/) monitors news media worldwide and computes an
@@ -53,9 +54,9 @@ plain HTTP (Python's built-in `urllib`, no library needed) in
   +10 (very positive); 0 is neutral. This is what the model tries to predict.
 - GDELT rate-limits per IP, so we retry with backoff on HTTP 429.
 
-### 2 & 3. Prices — Yahoo Finance (`yfinance`) (the two features)
-Both prices come from **Yahoo Finance** via the [`yfinance`](https://pypi.org/project/yfinance/)
-library (free, pip-installable, no API key). One function serves both feature
+### 2, 3 & 4. Prices — Yahoo Finance (`yfinance`) (the three features)
+All three prices come from **Yahoo Finance** via the [`yfinance`](https://pypi.org/project/yfinance/)
+library (free, pip-installable, no API key). One function serves all three feature
 streams — they differ only by ticker:
 
 ```python
@@ -63,11 +64,14 @@ import yfinance as yf
 
 yf.Ticker("SPY").history(period="1y")  # S&P 500 ETF
 yf.Ticker("GC=F").history(period="1y")  # gold futures (the precious metal)
+yf.Ticker("CL=F").history(period="1y")  # WTI crude oil futures
 ```
 
 - **`spy_close`** = daily closing price of SPY (tracks the S&P 500), USD.
 - **`metal_close`** = daily closing price of gold futures (`GC=F`), USD. Swap to
   `SI=F` (silver), `GLD`, etc. — it's just a ticker in the dashboard.
+- **`oil_close`** = daily closing price of WTI crude oil futures (`CL=F`), USD.
+  Swap to `BZ=F` (Brent crude) — again, just a ticker in the dashboard.
 - We only keep the `date` and `close` columns from each.
 
 ---
@@ -78,8 +82,8 @@ We use **SQLite** — a zero-setup database in a single file, `data/shorting.db`
 No server, no credentials. All DB access goes through `db.py`, which is tiny on
 purpose (`to_sql` writes a DataFrame, `read_sql` reads it back).
 
-- Three tables get created: **`tone`** (date, tone), **`spy`** (date, close) and
-  **`metal`** (date, close).
+- Four tables get created: **`tone`** (date, tone), **`spy`** (date, close),
+  **`metal`** (date, close) and **`oil`** (date, close).
 - The database also acts as a **cache**: if a fetch fails (e.g. GDELT rate-limits
   us), `controller.run()` falls back to the last data stored in the DB instead of
   crashing.
@@ -126,8 +130,9 @@ pytest                      # run the tests
 Just want to run the app, no dev tools? `pip install -e .` (or `pip install -r requirements.txt`) is enough.
 
 In the dashboard: type a GDELT query (e.g. `recession`), an index ticker (e.g.
-`SPY`) and a precious-metal ticker (e.g. `GC=F`), hit **Run flow**, and you get a
-chart of the actual `tone` vs. the model's `predicted_tone`.
+`SPY`), a precious-metal ticker (e.g. `GC=F`) and an oil ticker (e.g. `CL=F`),
+hit **Run flow**, and you get a chart of the actual `tone` vs. the model's
+`predicted_tone`.
 
 ---
 

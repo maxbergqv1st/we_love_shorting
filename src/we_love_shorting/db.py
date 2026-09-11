@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 DB_PATH = Path("data/shorting.db")
-_TABLES = ("tone", "spy", "metal")
+_TABLES = ("tone", "spy", "metal", "oil")
 
 
 def _conn() -> sqlite3.Connection:
