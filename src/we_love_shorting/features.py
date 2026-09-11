@@ -30,10 +30,18 @@ def build_features(
         .dropna()
         .reset_index(drop=True)
     )
-    # closed = price was carried forward from an earlier trading day (weekend/holiday)
-    df["market_closed"] = df["date"] != df["market_date"]
-    df = df.drop(columns="market_date")
-    df["date"] = df["date"].dt.date
     if df.empty:
         raise ValueError("no overlapping dates across prices and tone")
+    # closed = price was carried forward from an earlier trading day (weekend/holiday)
+    df["market_closed"] = df["date"] != df["market_date"]
+    # The latest date is "today": a carried-forward close there just means the
+    # market hasn't closed yet (pending), not that it's a non-trading day. Only
+    # weekends are truly closed on the current day.
+    # ponytail: weekday holidays on the current day slip through; add a holiday
+    # calendar if that edge matters.
+    last = df.index[-1]
+    if df.loc[last, "market_closed"] and df.loc[last, "date"].dayofweek < 5:
+        df.loc[last, "market_closed"] = False
+    df = df.drop(columns="market_date")
+    df["date"] = df["date"].dt.date
     return df

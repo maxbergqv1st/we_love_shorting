@@ -33,3 +33,15 @@ def test_weekend_tone_kept_with_friday_close():
     assert df["metal_close"].tolist() == [2000, 2000, 2000, 2020]
     # Sat/Sun flagged closed (carried-forward price); Fri/Mon are real trading days.
     assert df["market_closed"].tolist() == [False, True, True, False]
+
+
+def test_pending_weekday_close_not_flagged():
+    # Latest tone day is a weekday whose close hasn't published yet: pending, not closed.
+    thu, fri = pd.date_range("2024-01-04", periods=2).date  # Thu, Fri
+    tone = pd.DataFrame({"date": [thu, fri], "tone": [1.0, 2.0]})
+    spy = pd.DataFrame({"date": [thu], "spy_close": [100]})
+    metal = pd.DataFrame({"date": [thu], "metal_close": [2000]})
+
+    df = features.build_features(tone, spy, metal)
+
+    assert df["market_closed"].tolist() == [False, False]
