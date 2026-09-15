@@ -25,8 +25,8 @@ spy_symbol = st.text_input("Index ticker", "SPY")
 metal_symbol = st.text_input("Precious-metal ticker", "GC=F")
 oil_symbol = st.text_input("Oil ticker", "CL=F")
 
-run = st.cache_data(ttl="1h")(controller.run)  # DB-trained; cleared on top-up, 1h TTL
-# bounds staleness when the DB is filled from the CLI
+# reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
+get_data = st.cache_data(ttl="1h")(controller.get_data)
 
 
 def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
@@ -45,13 +45,13 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
             retry, more = controller._fetch_all(retry)
             errors |= more  # a retry can still surface a non-rate-limit error
     box.empty()
-    run.clear()  # DB changed -> recompute on next Run flow
+    get_data.clear()  # DB changed -> reload on next "Ladda data"
     if errors:
         st.error("Fel: " + "; ".join(f"{t}: {m}" for t, m in errors.items()))
     if retry:
         st.warning(f"Fortfarande rate-limitad: {', '.join(retry)}. Försök igen strax.")
     if not errors and not retry:
-        st.success("Klart. Kör 'Run flow' för att träna på datan.")
+        st.success("Klart. Klicka 'Ladda data' för att träna på den.")
 
 
 if st.button("Första fyllning (5 år)"):
@@ -66,18 +66,44 @@ if st.button("Fyll på till idag"):
         lambda: controller.update(query, spy_symbol, metal_symbol, oil_symbol),
     )
 
-if st.button("Run flow"):
-    df = run()
-    st.line_chart(df.set_index("date")[["tone", "predicted_tone"]])
-    styled = df.style.apply(
-        lambda row: (
-            ["background-color: #5a1f1f" if row.get("market_closed") else ""] * len(row)
-        ),
-        axis=1,
-    )  # market_closed drives the row colour below; hidden from view via column_config
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        column_config={"market_closed": None},  # None = hide, Styler still reads it
+if st.button("Ladda data"):
+    try:
+        st.session_state["df"] = get_data()
+    except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
+        st.error(
+            f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+        )
+
+if "df" in st.session_state:
+    df = st.session_state["df"]
+    # numeric columns are the feature/target menu; drop bookkeeping columns
+    candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
+    target = st.selectbox(
+        "Target (predict this)",
+        candidates,
+        index=candidates.index("tone") if "tone" in candidates else 0,
     )
-    st.caption("🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används.")
+    features = st.multiselect(
+        "Features (predict from these)", [c for c in candidates if c != target]
+    )
+
+    if features:
+        out = controller.run(df.copy(), features, target)  # cheap: no re-fetch
+        st.line_chart(out.set_index("date")[[target, f"predicted_{target}"]])
+        styled = out.style.apply(
+            lambda row: (
+                ["background-color: #5a1f1f" if row.get("market_closed") else ""]
+                * len(row)
+            ),
+            axis=1,
+        )  # market_closed drives the row colour; hidden via column_config
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            column_config={"market_closed": None},  # None = hide, Styler still reads it
+        )
+        st.caption(
+            "🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används."
+        )
+    else:
+        st.info("Välj minst en feature.")

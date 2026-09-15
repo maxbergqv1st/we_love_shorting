@@ -85,14 +85,29 @@ def update(
     )
 
 
-def run() -> pd.DataFrame:
-    """Read the stored data -> join -> train -> predict tone. No fetching:
-    the DB is the source of truth; fill it via backfill()/update()."""
-    df = features.build_features(
+def get_data() -> pd.DataFrame:
+    """Read the stored data and join into the wide feature table (no fetch, no
+    model). Fill the DB first via backfill()/update() — the DB is the source of
+    truth. Kept separate from run() so the UI can cache this once and re-train on
+    different feature/target picks without touching the data sources.
+    """
+    return features.build_features(
         db.load("tone"), db.load("spy"), db.load("metal"), db.load("oil")
     )
-    model = signal_model.train(df)
-    df["predicted_tone"] = signal_model.predict(df, model)
+
+
+def run(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+) -> pd.DataFrame:
+    """Train on the chosen features/target and add a `predicted_{target}` column.
+
+    The model is handed straight to predict, so we skip persisting it — the UI
+    calls this on every rerun and doesn't reload from disk.
+    """
+    model = signal_model.train(df, feature_cols, target, persist=False)
+    df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
     return df
 
 
