@@ -18,15 +18,17 @@ def refresh(query: str, spy_symbol: str, metal_symbol: str, oil_symbol: str) -> 
     db.save("oil", yahoo.fetch_prices(oil_symbol, value_col="oil_close"))
 
 
-def run(
+def get_data(
     query: str = "recession",
     spy_symbol: str = "SPY",
     metal_symbol: str = "GC=F",
     oil_symbol: str = "CL=F",
 ) -> pd.DataFrame:
-    """Full flow: fetch -> store -> join -> train -> predict tone.
+    """Fetch -> store -> join into the wide feature table (no model).
 
     Falls back to cached DB data if a fetch fails (e.g. GDELT rate-limits).
+    Kept separate from `run` so the UI can cache this once and re-train on
+    different feature/target picks without re-hitting the data sources.
     """
     try:
         refresh(query, spy_symbol, metal_symbol, oil_symbol)
@@ -37,9 +39,21 @@ def run(
             raise RuntimeError(f"fetch failed and no cached data: {e}") from e
         log.warning("fetch failed (%s); using cached DB data", e)
 
-    df = features.build_features(
+    return features.build_features(
         db.load("tone"), db.load("spy"), db.load("metal"), db.load("oil")
     )
-    model = signal_model.train(df)
-    df["predicted_tone"] = signal_model.predict(df, model)
+
+
+def run(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+) -> pd.DataFrame:
+    """Train on the chosen features/target and add a `predicted_{target}` column.
+
+    The model is handed straight to predict, so we skip persisting it — the UI
+    calls this on every rerun and doesn't reload from disk.
+    """
+    model = signal_model.train(df, feature_cols, target, persist=False)
+    df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
     return df
