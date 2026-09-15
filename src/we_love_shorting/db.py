@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from .features import TICKERS
+
 DB_PATH = Path("data/shorting.db")
-_TABLES = ("tone", "spy", "metal", "oil")
+_TABLES = ("tone", *TICKERS)  # one table per stream; names validated against this
 
 
 def _conn() -> sqlite3.Connection:
@@ -21,9 +23,35 @@ def _table(name: str) -> str:
     return name
 
 
-def save(table: str, df: pd.DataFrame) -> None:
-    with closing(_conn()) as c, c:  # c: commits, closing() closes
-        df.to_sql(_table(table), c, if_exists="replace", index=False)
+def upsert(table: str, df: pd.DataFrame) -> None:
+    """Append rows, keeping the newest row per date. Idempotent top-up: refetching
+    an already-stored date overwrites it instead of duplicating."""
+    if df.empty:
+        return  # nothing to add (e.g. an incremental fetch that's already current)
+    name = _table(table)  # validate once; used for both read and write
+    with closing(_conn()) as c, c:
+        df = df.copy()
+        # Fresh fetches carry datetime.date objects; SQLite stores dates as ISO
+        # text. Normalise to str so concat/dedup/sort never mix the two types.
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        try:
+            old = pd.read_sql(f"select * from {name}", c)
+            df = pd.concat([old, df]).drop_duplicates("date", keep="last")
+        except pd.errors.DatabaseError:
+            pass  # table doesn't exist yet -> first write
+        # ponytail: full-table rewrite per top-up; switch to INSERT OR REPLACE
+        # if a table ever reaches six-figure row counts.
+        df.sort_values("date").to_sql(name, c, if_exists="replace", index=False)
+
+
+def last_date(table: str) -> str | None:
+    """Newest stored ISO date (YYYY-MM-DD sorts correctly as text), or None if empty."""
+    with closing(_conn()) as c:
+        try:
+            m = pd.read_sql(f"select max(date) m from {_table(table)}", c).m[0]
+        except pd.errors.DatabaseError:
+            return None
+    return m  # None when the table exists but holds no rows
 
 
 def load(table: str) -> pd.DataFrame:

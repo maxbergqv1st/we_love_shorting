@@ -5,6 +5,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -23,17 +24,33 @@ def _get_json(url: str) -> dict:
         return json.load(r)
 
 
-def fetch_tone(query: str, timespan: str = "12m") -> pd.DataFrame:
-    """Daily average news tone for a query term (GDELT DOC 2.0 timelinetone)."""
-    params = urllib.parse.urlencode(
-        {"query": query, "mode": "timelinetone", "timespan": timespan, "format": "json"}
-    )
+def fetch_tone(
+    query: str, timespan: str = "12m", start: str | None = None
+) -> pd.DataFrame:
+    """Daily average news tone for a query term (GDELT DOC 2.0 timelinetone).
+
+    `start` (ISO date) fetches start..now via startdatetime/enddatetime for
+    incremental top-ups; otherwise the rolling `timespan` window applies.
+    Note: GDELT DOC serves only a rolling window (roughly 2017 onward), so a
+    backfill reaches less far back than the price sources.
+    """
+    q = {"query": query, "mode": "timelinetone", "format": "json"}
+    if start is not None:
+        q["startdatetime"] = start.replace("-", "") + "000000"
+        q["enddatetime"] = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    else:
+        q["timespan"] = timespan
+    params = urllib.parse.urlencode(q)
     url = f"{GDELT_DOC}?{params}"
     log.info("GDELT fetch: %s", url)
     data = _get_json(url)
     timeline = data.get("timeline") or [{}]  # empty query result -> [] -> [{}]
     rows = timeline[0].get("data", [])
     if not rows:
+        if (
+            start is not None
+        ):  # incremental: no tone points since `start` -> not an error
+            return pd.DataFrame(columns=["date", "tone"])
         raise ValueError(f"GDELT returned no data for query {query!r}")
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"]).dt.date
