@@ -10,36 +10,103 @@ from .sources import gdelt, yahoo
 log = logging.getLogger(__name__)
 
 
-def refresh(query: str, spy_symbol: str, metal_symbol: str, oil_symbol: str) -> None:
-    """Pull each source into its own table (each commits only on success)."""
-    db.save("tone", gdelt.fetch_tone(query))
-    db.save("spy", yahoo.fetch_prices(spy_symbol, value_col="spy_close"))
-    db.save("metal", yahoo.fetch_prices(metal_symbol, value_col="metal_close"))
-    db.save("oil", yahoo.fetch_prices(oil_symbol, value_col="oil_close"))
+def _fetch_all(specs: dict) -> tuple[dict, dict]:
+    """Run each {table: fetch-callable}, upserting successes independently.
+
+    Every source commits on its own, so one source's failure doesn't discard the
+    others. Returns two dicts:
+      retry  = {table: fetch-callable} that hit a rate-limit (HTTP 429) — worth
+               retrying after a cooldown.
+      errors = {table: message} that failed for any other reason (bad ticker,
+               empty backfill, …) — retrying won't help, surface immediately.
+    An incremental fetch that's already current returns an empty frame, which
+    db.upsert no-ops on, so "nothing new" is neither a retry nor an error.
+    """
+    retry, errors = {}, {}
+    for table, fetch in specs.items():
+        try:
+            db.upsert(table, fetch())
+        except Exception as e:  # noqa: BLE001 - keep going; classify below
+            log.warning("fetch for %s failed: %s", table, e)
+            if getattr(e, "code", None) == 429:  # urllib.error.HTTPError rate-limit
+                retry[table] = fetch
+            else:
+                errors[table] = str(e)
+    return retry, errors
 
 
-def run(
+def backfill(
     query: str = "recession",
     spy_symbol: str = "SPY",
     metal_symbol: str = "GC=F",
     oil_symbol: str = "CL=F",
-) -> pd.DataFrame:
-    """Full flow: fetch -> store -> join -> train -> predict tone.
+) -> tuple[dict, dict]:
+    """First fill: pull ~5 years of history for each source into the DB.
 
-    Falls back to cached DB data if a fetch fails (e.g. GDELT rate-limits).
+    GDELT tone only covers a rolling window (~2017 on), so the tone table may
+    start later than the 5-year price history. Run once, then keep it current
+    with update(). Prices fetch first so a GDELT hiccup still leaves them saved.
+    Returns _fetch_all's (retry, errors) pair.
     """
-    try:
-        refresh(query, spy_symbol, metal_symbol, oil_symbol)
-    except Exception as e:  # noqa: BLE001 - any fetch failure should fall back to cache
-        try:
-            db.load("tone")  # probe: raises if we have no cached data at all
-        except Exception:  # noqa: BLE001 - no cache yet -> surface the original error
-            raise RuntimeError(f"fetch failed and no cached data: {e}") from e
-        log.warning("fetch failed (%s); using cached DB data", e)
+    return _fetch_all(
+        {
+            "spy": lambda: yahoo.fetch_prices(spy_symbol, "5y", "spy_close"),
+            "metal": lambda: yahoo.fetch_prices(metal_symbol, "5y", "metal_close"),
+            "oil": lambda: yahoo.fetch_prices(oil_symbol, "5y", "oil_close"),
+            "tone": lambda: gdelt.fetch_tone(query, timespan="60m"),
+        }
+    )
 
+
+def update(
+    query: str = "recession",
+    spy_symbol: str = "SPY",
+    metal_symbol: str = "GC=F",
+    oil_symbol: str = "CL=F",
+) -> tuple[dict, dict]:
+    """Top up each table from its newest stored date to today (no full refetch).
+
+    An empty table (never backfilled) falls back to the default fetch window.
+    Returns _fetch_all's (retry, errors) pair.
+    """
+    return _fetch_all(
+        {
+            "spy": lambda: yahoo.fetch_prices(
+                spy_symbol, value_col="spy_close", start=db.last_date("spy")
+            ),
+            "metal": lambda: yahoo.fetch_prices(
+                metal_symbol, value_col="metal_close", start=db.last_date("metal")
+            ),
+            "oil": lambda: yahoo.fetch_prices(
+                oil_symbol, value_col="oil_close", start=db.last_date("oil")
+            ),
+            "tone": lambda: gdelt.fetch_tone(query, start=db.last_date("tone")),
+        }
+    )
+
+
+def run() -> pd.DataFrame:
+    """Read the stored data -> join -> train -> predict tone. No fetching:
+    the DB is the source of truth; fill it via backfill()/update()."""
     df = features.build_features(
         db.load("tone"), db.load("spy"), db.load("metal"), db.load("oil")
     )
     model = signal_model.train(df)
     df["predicted_tone"] = signal_model.predict(df, model)
     return df
+
+
+if __name__ == "__main__":  # one-time backfill: python -m we_love_shorting.controller
+    import sys
+
+    logging.basicConfig(level=logging.INFO)
+    retry, errors = backfill()
+    if (
+        retry or errors
+    ):  # partial backfill -> non-zero exit so it isn't mistaken for done
+        for table, msg in {
+            **{t: "rate-limited (429)" for t in retry},
+            **errors,
+        }.items():
+            log.error("backfill incomplete for %s: %s", table, msg)
+        sys.exit(1)
