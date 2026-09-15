@@ -19,11 +19,11 @@ Each data source is its own process in its own module. They stay **separate**
 right up until `features.py`, where they meet and join on the date.
 
 ```
-  sources/gdelt.py   GDELT ───► fetch_tone()   ─┐  (default target: news tone)
-  sources/yahoo.py   Yahoo ───► fetch_prices()  ├─► db.py ─► features.py ─► signal_model.py ─► app.py
-                     (indices)                   │  SQLite    join on date   train + predict    Streamlit
-                     (metals)     fetch_prices() ┤           = the meeting                       dashboard
-                     (oil)        fetch_prices() ┘
+  sources/gdelt.py   GDELT ───► fetch_tone()        ─┐  (default target: news tone)
+  sources/yahoo.py   Yahoo ───► fetch_prices()       ├─► db.py ─► features.py ─► signal_model.py ─► app.py
+                     (^GSPC, ^OMX, ^STOXX50E)         │  SQLite    join on date   train + predict    Streamlit
+                     (GC=F, SI=F, HG=F) fetch_prices()┤           = the meeting                       dashboard
+                     (CL=F)             fetch_prices()┘
 ```
 
 The price streams are fixed in `features.TICKERS`; the dashboard no longer asks
