@@ -35,54 +35,44 @@ def _fetch_all(specs: dict) -> tuple[dict, dict]:
     return retry, errors
 
 
-def backfill(
-    query: str = "recession",
-    spy_symbol: str = "SPY",
-    metal_symbol: str = "GC=F",
-    oil_symbol: str = "CL=F",
-) -> tuple[dict, dict]:
-    """First fill: pull ~5 years of history for each source into the DB.
+def _sources(query: str, *, incremental: bool) -> dict:
+    """Every stream keyed by its DB table -> a fetch-callable. Tone (GDELT) sits
+    beside the price streams (Yahoo); only its data source differs. `incremental`
+    fetches from each table's last stored date; otherwise a full ~5y / rolling
+    backfill.
+    """
+    src = {}
+    for stem, ticker in features.TICKERS.items():
+        col = f"{stem}_close"
+        if incremental:
+            src[stem] = lambda t=ticker, c=col, s=stem: yahoo.fetch_prices(
+                t, value_col=c, start=db.last_date(s)
+            )
+        else:
+            src[stem] = lambda t=ticker, c=col: yahoo.fetch_prices(t, "5y", c)
+    if incremental:
+        src["tone"] = lambda: gdelt.fetch_tone(query, start=db.last_date("tone"))
+    else:
+        src["tone"] = lambda: gdelt.fetch_tone(query, timespan="60m")
+    return src
 
-    GDELT tone only covers a rolling window (~2017 on), so the tone table may
-    start later than the 5-year price history. Run once, then keep it current
-    with update(). Prices fetch first so a GDELT hiccup still leaves them saved.
+
+def backfill(query: str = "recession") -> tuple[dict, dict]:
+    """First fill: pull ~5 years of history for every stream into the DB. Tickers
+    are fixed in features.TICKERS (the UI no longer asks). GDELT tone only covers
+    a rolling window (~2017 on), so its table may start later than the price
+    history. Run once, then keep it current with update().
     Returns _fetch_all's (retry, errors) pair.
     """
-    return _fetch_all(
-        {
-            "spy": lambda: yahoo.fetch_prices(spy_symbol, "5y", "spy_close"),
-            "metal": lambda: yahoo.fetch_prices(metal_symbol, "5y", "metal_close"),
-            "oil": lambda: yahoo.fetch_prices(oil_symbol, "5y", "oil_close"),
-            "tone": lambda: gdelt.fetch_tone(query, timespan="60m"),
-        }
-    )
+    return _fetch_all(_sources(query, incremental=False))
 
 
-def update(
-    query: str = "recession",
-    spy_symbol: str = "SPY",
-    metal_symbol: str = "GC=F",
-    oil_symbol: str = "CL=F",
-) -> tuple[dict, dict]:
+def update(query: str = "recession") -> tuple[dict, dict]:
     """Top up each table from its newest stored date to today (no full refetch).
-
     An empty table (never backfilled) falls back to the default fetch window.
     Returns _fetch_all's (retry, errors) pair.
     """
-    return _fetch_all(
-        {
-            "spy": lambda: yahoo.fetch_prices(
-                spy_symbol, value_col="spy_close", start=db.last_date("spy")
-            ),
-            "metal": lambda: yahoo.fetch_prices(
-                metal_symbol, value_col="metal_close", start=db.last_date("metal")
-            ),
-            "oil": lambda: yahoo.fetch_prices(
-                oil_symbol, value_col="oil_close", start=db.last_date("oil")
-            ),
-            "tone": lambda: gdelt.fetch_tone(query, start=db.last_date("tone")),
-        }
-    )
+    return _fetch_all(_sources(query, incremental=True))
 
 
 def get_data() -> pd.DataFrame:
@@ -91,9 +81,8 @@ def get_data() -> pd.DataFrame:
     truth. Kept separate from run() so the UI can cache this once and re-train on
     different feature/target picks without touching the data sources.
     """
-    return features.build_features(
-        db.load("tone"), db.load("spy"), db.load("metal"), db.load("oil")
-    )
+    prices = {stem: db.load(stem) for stem in features.TICKERS}
+    return features.build_features(db.load("tone"), prices)
 
 
 def run(
