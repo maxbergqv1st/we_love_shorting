@@ -102,7 +102,15 @@ if "df" in st.session_state:
 
     if feature_cols:
         out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
-        st.line_chart(out.set_index("date")[[target, f"predicted_{target}"]])
+        name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
+        # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
+        # keeps a stable order whether Streamlit colours by column or by (sorted)
+        # series name — the explicit list then pins actual=blue, prediction=orange.
+        actual, pred = f"Faktisk: {name}", f"Prediktion: {name}"
+        chart = out.set_index("date")[[target, f"predicted_{target}"]].rename(
+            columns={target: actual, f"predicted_{target}": pred}
+        )
+        st.line_chart(chart, color=["#4c78a8", "#f58518"])
         styled = out.style.apply(
             lambda row: (
                 ["background-color: #5a1f1f" if row.get("market_closed") else ""]
