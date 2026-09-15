@@ -1,39 +1,66 @@
-"""The meeting point: the four separate streams (SPY price, metal price, oil
-price, tone) join here into one feature table. Features = the three daily
-prices; target = tone."""
+"""The meeting point: the fixed price streams and news tone join here into one
+wide feature table. Any numeric column can be the prediction target; the rest
+are candidate features (picked in the UI)."""
 
 import pandas as pd
 
-FEATURES = ["spy_close", "metal_close", "oil_close"]
-TARGET = "tone"
+# Fixed Yahoo streams: column-stem -> ticker. The UI no longer asks for tickers.
+# Each is stored as a `<stem>_close` column.
+TICKERS = {
+    "sp500": "^GSPC",  # S&P 500 (US)
+    "omx30": "^OMX",  # OMX Stockholm 30 (Sweden)
+    "eurostoxx": "^STOXX50E",  # EURO STOXX 50 (Europe)
+    "gold": "GC=F",
+    "silver": "SI=F",
+    "copper": "HG=F",
+    "oil": "CL=F",  # crude oil
+}
+# Every measured value the model can use. tone (GDELT) is one column in the pool
+# beside the price columns — any of them can be the TARGET or a FEATURE.
+COLUMNS = ["tone", *(f"{stem}_close" for stem in TICKERS)]
+TARGET = "tone"  # default target (swappable in the UI)
+FEATURES = [c for c in COLUMNS if c != TARGET]  # default: predict from all the rest
 
 
-def build_features(
-    tone: pd.DataFrame, spy: pd.DataFrame, metal: pd.DataFrame, oil: pd.DataFrame
-) -> pd.DataFrame:
-    """Join by date: SPY + precious-metal + oil close predict that day's news tone.
+def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Join every price stream + news tone by date into one wide table.
 
-    Markets close on weekends/holidays but news tone still flows every day, so an
-    inner join would silently drop ~2 days a week. Instead each tone date keeps its
-    own news and inherits the most recent close (Friday's, over a weekend) via an
-    asof (backward) join.
+    The streams trade on different calendars (US, Stockholm, Europe, commodities),
+    so an inner join would drop every day any one exchange was closed. Instead we
+    outer-merge and forward-fill: a day one exchange is shut inherits that
+    exchange's most recent close. News tone flows daily, so each tone date then
+    inherits the most recent price block via an asof (backward) join — Friday's
+    close carries over the weekend.
+
+    `market_closed` flags carried-forward closes against ONE reference calendar
+    (the first stream, i.e. the S&P 500 / US market) — a foreign exchange trading
+    on a US holiday must not un-flag that carried-forward US close.
     """
-    prices = spy.merge(metal, on="date").merge(oil, on="date").sort_values("date")
-    tone = tone.sort_values("date")
+    frames = list(prices.values())
+    ref_dates = pd.to_datetime(frames[0]["date"])  # reference market's trading days
+    merged = frames[0]
+    for frame in frames[1:]:
+        merged = merged.merge(frame, on="date", how="outer")
+    merged = merged.sort_values("date")
     # merge_asof needs datetime64 keys, not datetime.date objects.
-    for frame in (prices, tone):
-        frame["date"] = pd.to_datetime(frame["date"])
-    prices["market_date"] = prices[
-        "date"
-    ]  # survives asof to flag carried-forward closes
+    merged["date"] = pd.to_datetime(merged["date"])
+    # market_date holds the date only on reference trading days (NaT otherwise);
+    # ffill then makes it the most recent reference close, so days the reference
+    # market was shut keep pointing back at it even if another exchange traded.
+    merged["market_date"] = merged["date"].where(merged["date"].isin(ref_dates))
+    # ponytail: ffill carries a paused/delisted stream's last close forward
+    # indefinitely; add a max-carry-forward staleness guard if a feed goes dark.
+    merged = merged.ffill()  # carry each stream's last close over its own closed days
+    tone = tone.sort_values("date")
+    tone["date"] = pd.to_datetime(tone["date"])
     df = (
-        pd.merge_asof(tone, prices, on="date", direction="backward")
+        pd.merge_asof(tone, merged, on="date", direction="backward")
         .dropna()
         .reset_index(drop=True)
     )
     if df.empty:
         raise ValueError("no overlapping dates across prices and tone")
-    # closed = price was carried forward from an earlier trading day (weekend/holiday)
+    # closed = price block was carried forward from an earlier trading day
     df["market_closed"] = df["date"] != df["market_date"]
     # The latest date is "today": a carried-forward close there just means the
     # market hasn't closed yet (pending), not that it's a non-trading day. Only

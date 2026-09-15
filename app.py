@@ -11,7 +11,7 @@ sys.path.insert(
 
 import streamlit as st
 
-from we_love_shorting import controller
+from we_love_shorting import controller, features
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,10 +20,19 @@ st.caption(
     "SPY + precious-metal + oil prices → predicted news tone. Low tone = bearish."
 )
 
-query = st.text_input("GDELT query", "recession")
-spy_symbol = st.text_input("Index ticker", "SPY")
-metal_symbol = st.text_input("Precious-metal ticker", "GC=F")
-oil_symbol = st.text_input("Oil ticker", "CL=F")
+query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
+
+# Readable labels for the fixed streams; keys are the DataFrame columns.
+LABELS = {
+    "tone": "News tone",
+    "sp500_close": "S&P 500",
+    "omx30_close": "OMX Stockholm 30",
+    "eurostoxx_close": "EURO STOXX 50",
+    "gold_close": "Gold",
+    "silver_close": "Silver",
+    "copper_close": "Copper",
+    "oil_close": "Crude oil",
+}
 
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
@@ -55,15 +64,11 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
 
 
 if st.button("Första fyllning (5 år)"):
-    fill(
-        "Hämtar ~5 års historik…",
-        lambda: controller.backfill(query, spy_symbol, metal_symbol, oil_symbol),
-    )
+    fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
 
 if st.button("Fyll på till idag"):
     fill(
-        "Hämtar från senaste lagrade datum till idag…",
-        lambda: controller.update(query, spy_symbol, metal_symbol, oil_symbol),
+        "Hämtar från senaste lagrade datum till idag…", lambda: controller.update(query)
     )
 
 if st.button("Ladda data"):
@@ -78,17 +83,25 @@ if "df" in st.session_state:
     df = st.session_state["df"]
     # numeric columns are the feature/target menu; drop bookkeeping columns
     candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
+
+    st.subheader("Vad ska modellen förutsäga?")
+    default_target = features.TARGET if features.TARGET in candidates else candidates[0]
     target = st.selectbox(
-        "Target (predict this)",
+        "TARGET (faktiskt värde att förutsäga)",
         candidates,
-        index=candidates.index("tone") if "tone" in candidates else 0,
+        index=candidates.index(default_target),
+        format_func=lambda c: LABELS.get(c, c),
     )
-    features = st.multiselect(
-        "Features (predict from these)", [c for c in candidates if c != target]
+    feature_opts = [c for c in candidates if c != target]
+    feature_cols = st.multiselect(
+        "FEATURES (förutsäg från dessa)",
+        feature_opts,
+        default=feature_opts,  # start with everything else selected
+        format_func=lambda c: LABELS.get(c, c),
     )
 
-    if features:
-        out = controller.run(df.copy(), features, target)  # cheap: no re-fetch
+    if feature_cols:
+        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
         st.line_chart(out.set_index("date")[[target, f"predicted_{target}"]])
         styled = out.style.apply(
             lambda row: (

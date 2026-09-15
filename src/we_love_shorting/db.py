@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from .features import TICKERS
+
 DB_PATH = Path("data/shorting.db")
-_TABLES = ("tone", "spy", "metal", "oil")
+_TABLES = ("tone", *TICKERS)  # one table per stream; names validated against this
 
 
 def _conn() -> sqlite3.Connection:
