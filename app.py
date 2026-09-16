@@ -101,8 +101,12 @@ if "df" in st.session_state:
     )
 
     if feature_cols:
-        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
         name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
+        feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
+        st.info(
+            f"🧠 Tränar **Linear Regression** → förutsäger **{name}** från {feature_names}"
+        )
+        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
         # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
