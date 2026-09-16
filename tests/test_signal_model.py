@@ -15,7 +15,7 @@ def test_dynamic_features_and_target_roundtrip():
     )
     features, target = ["tone", "oil_close"], "spy_close"
 
-    model = signal_model.train(df, features, target)
+    model = signal_model.train(df, features, target, persist=False)
     pred = signal_model.predict(df, model, features)
     assert len(pred) == len(df)
 
