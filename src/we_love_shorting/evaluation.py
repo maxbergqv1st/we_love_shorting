@@ -1,0 +1,91 @@
+"""Train/test evaluation: chronological split, naive baseline, regression
+metrics, and residuals. Kept separate from signal_model.py (the model-fitting
+layer) since these are orthogonal evaluation concerns, not part of fitting."""
+
+import logging
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_absolute_error, root_mean_squared_error
+
+log = logging.getLogger(__name__)
+
+
+def drop_market_closed(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows where `market_closed` is True, before any train/test split.
+
+    build_features' ffill carries both `_close` and `_ret` forward unchanged
+    on a closed day, so a run of closed days (e.g. Fri+Sat+Sun) shares one
+    identical `_ret` value across several rows while `tone` keeps changing
+    daily. Training on those rows would teach the model a duplicated,
+    artificial relationship instead of genuine day-over-day signal.
+
+    Eval-only: the live chart (controller.run) intentionally keeps every row,
+    closed-market included, so this must not run there.
+    """
+    closed = df["market_closed"]
+    log.info("dropped %d market-closed rows before eval split", int(closed.sum()))
+    return df[~closed].reset_index(drop=True)
+
+
+def chronological_split(
+    df: pd.DataFrame, test_frac: float = 0.2
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split `df` by date: the last `test_frac` rows are the test set, the
+    rest are train.
+
+    Chronological, not random: the streams are autocorrelated (ffill'd
+    prices, day-over-day returns), so a random shuffle would leak nearby rows
+    into both train and test and overstate accuracy. Sorting by date first
+    and taking the tail keeps the test set a genuinely held-out future
+    window.
+    """
+    ordered = df.sort_values("date").reset_index(drop=True)
+    split_at = int(len(ordered) * (1 - test_frac))
+    train = ordered.iloc[:split_at].reset_index(drop=True)
+    test = ordered.iloc[split_at:].reset_index(drop=True)
+    return train, test
+
+
+def baseline_kind(target: str) -> str:
+    """Which naive baseline `naive_baseline` uses for `target`.
+
+    `"mean"` for a `<stem>_ret` column: returns are close to stationary/white
+    noise, so "yesterday's return predicts today's" is a weak baseline — the
+    historical mean is the standard naive forecast for a return series.
+    `"persistence"` for anything else (price levels, tone): those are highly
+    autocorrelated, so carrying the last actual value forward is the
+    standard, much stronger naive benchmark for a level series.
+    """
+    return "mean" if target.endswith("_ret") else "persistence"
+
+
+def naive_baseline(train_target: pd.Series, test_target: pd.Series) -> pd.Series:
+    """Naive forecast for `test_target` to compare the model against, chosen
+    by `baseline_kind(train_target.name)` — see that function for the rule.
+
+    The persistence baseline predicts each test row from the actual previous
+    row's value; the first test row has no in-test predecessor, so it's
+    seeded with the last train value.
+    """
+    if baseline_kind(train_target.name) == "mean":
+        return pd.Series(train_target.mean(), index=test_target.index, name="baseline")
+    seed = pd.Series([train_target.iloc[-1]])
+    shifted = pd.concat([seed, test_target.iloc[:-1]], ignore_index=True)
+    return pd.Series(shifted.to_numpy(), index=test_target.index, name="baseline")
+
+
+def regression_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
+    """RMSE and MAE for `y_pred` against the ground truth `y_true`."""
+    return {
+        "rmse": float(root_mean_squared_error(y_true, y_pred)),
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+    }
+
+
+def residuals(y_true: pd.Series, y_pred: pd.Series) -> pd.Series:
+    """Actual minus predicted, indexed like `y_true` so it stays plottable in
+    the same (chronological, post-split) row order as the test set."""
+    return pd.Series(
+        np.asarray(y_true) - np.asarray(y_pred), index=y_true.index, name="residual"
+    )
