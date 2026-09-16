@@ -1,6 +1,9 @@
 # venv
 .venv/
 
+# editor
+.vscode/
+
 # python
 __pycache__/
 *.py[cod]

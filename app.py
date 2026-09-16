@@ -15,12 +15,15 @@ from we_love_shorting import controller, features
 
 logging.basicConfig(level=logging.INFO)
 
-st.title("we_love_shorting — price → news-tone signal")
+st.markdown("### 📉 we_love_shorting")
+st.title("Price → news-tone signal")
 st.caption(
     "SPY + precious-metal + oil prices → predicted news tone. Low tone = bearish."
 )
 
-query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
+with st.sidebar:
+    st.header("Inställningar")
+    query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
 
 # Readable labels for the fixed streams; keys are the DataFrame columns.
 LABELS = {
@@ -33,6 +36,13 @@ LABELS = {
     "copper_close": "Copper",
     "oil_close": "Crude oil",
 }
+
+# Model roadmap: only Linear Regression is implemented (signal_model.py).
+# The others are shown so the UI already has a place for them once built.
+MODELS = ["Linear Regression", "Ridge Regression 🔒", "Random Forest 🔒"]
+
+# Chart timespan filter: trading days to show, counting back from the latest row.
+TIMESPANS = {"Vecka": 5, "Månad": 21, "År": 252, "Allt": None}
 
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
@@ -63,54 +73,82 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
         st.success("Klart. Klicka 'Ladda data' för att träna på den.")
 
 
-if st.button("Första fyllning (5 år)"):
-    fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
+with st.sidebar:
+    if st.button("Första fyllning (5 år)"):
+        fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
 
-if st.button("Fyll på till idag"):
-    fill(
-        "Hämtar från senaste lagrade datum till idag…", lambda: controller.update(query)
-    )
-
-if st.button("Ladda data"):
-    try:
-        st.session_state["df"] = get_data()
-    except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
-        st.error(
-            f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+    if st.button("Fyll på till idag"):
+        fill(
+            "Hämtar från senaste lagrade datum till idag…",
+            lambda: controller.update(query),
         )
+
+    if st.button("Ladda data"):
+        try:
+            st.session_state["df"] = get_data()
+        except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
+            st.error(
+                f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+            )
 
 if "df" in st.session_state:
     df = st.session_state["df"]
+    st.caption(f"✅ Data laddad: {df['date'].min()} → {df['date'].max()}")
     # numeric columns are the feature/target menu; drop bookkeeping columns
     candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
 
-    st.subheader("Vad ska modellen förutsäga?")
-    default_target = features.TARGET if features.TARGET in candidates else candidates[0]
-    target = st.selectbox(
-        "TARGET (faktiskt värde att förutsäga)",
-        candidates,
-        index=candidates.index(default_target),
-        format_func=lambda c: LABELS.get(c, c),
-    )
-    feature_opts = [c for c in candidates if c != target]
-    feature_cols = st.multiselect(
-        "FEATURES (förutsäg från dessa)",
-        feature_opts,
-        default=feature_opts,  # start with everything else selected
-        format_func=lambda c: LABELS.get(c, c),
-    )
+    with st.sidebar:
+        st.subheader("Modell")
+        model_choice = st.selectbox("MODELL", MODELS)
+        if model_choice != "Linear Regression":
+            st.caption("🔒 Kommer snart — kör Linear Regression tills vidare.")
+
+        st.subheader("Vad ska modellen förutsäga?")
+        default_target = (
+            features.TARGET if features.TARGET in candidates else candidates[0]
+        )
+        target = st.selectbox(
+            "TARGET (faktiskt värde att förutsäga)",
+            candidates,
+            index=candidates.index(default_target),
+            format_func=lambda c: LABELS.get(c, c),
+        )
+        feature_opts = [c for c in candidates if c != target]
+        feature_cols = st.multiselect(
+            "FEATURES (förutsäg från dessa)",
+            feature_opts,
+            default=feature_opts,  # start with everything else selected
+            format_func=lambda c: LABELS.get(c, c),
+        )
 
     if feature_cols:
-        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
         name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
+        feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
+        st.info(
+            f"🧠 Tränar **Linear Regression** → förutsäger **{name}** från {feature_names}"
+        )
+        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
+        latest = out.iloc[-1]
+        col1, col2, col3 = st.columns(3)
+        col1.metric(f"Senaste faktiska: {name}", f"{latest[target]:.2f}")
+        col2.metric(
+            f"Senaste prediktion: {name}", f"{latest[f'predicted_{target}']:.2f}"
+        )
+        col3.metric(
+            "Differens", f"{latest[f'predicted_{target}'] - latest[target]:.2f}"
+        )
         # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
         actual, pred = f"Faktisk: {name}", f"Prediktion: {name}"
-        chart = out.set_index("date")[[target, f"predicted_{target}"]].rename(
+        chart_slot = st.empty()  # reserved above the timespan picker, filled below
+        timespan = st.radio("Visa", list(TIMESPANS), index=3, horizontal=True)
+        days = TIMESPANS[timespan]
+        windowed = out if days is None else out.tail(days)
+        chart = windowed.set_index("date")[[target, f"predicted_{target}"]].rename(
             columns={target: actual, f"predicted_{target}": pred}
         )
-        st.line_chart(chart, color=["#4c78a8", "#f58518"])
+        chart_slot.line_chart(chart, color=["#4c78a8", "#f58518"])
         styled = out.style.apply(
             lambda row: (
                 ["background-color: #5a1f1f" if row.get("market_closed") else ""]
