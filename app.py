@@ -9,6 +9,8 @@ sys.path.insert(
     0, str(Path(__file__).parent / "src")
 )  # ponytail: path shim, drop after `pip install -e .`
 
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 from we_love_shorting import controller, features
@@ -32,6 +34,13 @@ LABELS = {
     "silver_close": "Silver",
     "copper_close": "Copper",
     "oil_close": "Crude oil",
+    "sp500_ret": "S&P 500 (daily % change)",
+    "omx30_ret": "OMX Stockholm 30 (daily % change)",
+    "eurostoxx_ret": "EURO STOXX 50 (daily % change)",
+    "gold_ret": "Gold (daily % change)",
+    "silver_ret": "Silver (daily % change)",
+    "copper_ret": "Copper (daily % change)",
+    "oil_ret": "Crude oil (daily % change)",
 }
 
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
@@ -126,5 +135,86 @@ if "df" in st.session_state:
         st.caption(
             "🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används."
         )
+
+        st.subheader("Evaluering (train/test)")
+        if st.button("Kör evaluering"):
+            try:
+                st.session_state["eval_result"] = controller.evaluate(
+                    df, feature_cols, target
+                )
+                st.session_state["eval_feature_cols"] = feature_cols
+                st.session_state["eval_target"] = target
+            except Exception as e:  # noqa: BLE001 - too little data after filtering, etc.
+                st.session_state.pop("eval_result", None)
+                st.warning(f"Kunde inte evaluera: {e}")
+
+        if "eval_result" in st.session_state:
+            eval_result = st.session_state["eval_result"]
+            used_target = st.session_state["eval_target"]
+            used_feature_cols = st.session_state["eval_feature_cols"]
+
+            if used_target != target or used_feature_cols != feature_cols:
+                st.info(
+                    "Valen ovan har ändrats sedan senaste evalueringen — "
+                    "resultaten nedan gäller fortfarande föregående val. "
+                    "Klicka 'Kör evaluering' för att uppdatera."
+                )
+
+            train_df, test_df = eval_result.train_df, eval_result.test_df
+            display_cols = [
+                "date",
+                used_target,
+                f"predicted_{used_target}",
+                f"baseline_{used_target}",
+                "residual",
+                "baseline_residual",
+            ]
+            baseline_label = (
+                "medelvärde (avkastning – nära stationär, så historiskt "
+                "medelvärde är den naiva prognosen)"
+                if eval_result.baseline_kind == "mean"
+                else "persistence (nivå – starkt autokorrelerad, så gårdagens "
+                "faktiska värde är den naiva prognosen)"
+            )
+            st.caption(
+                f"Träning: {train_df['date'].min()}–{train_df['date'].max()} "
+                f"({len(train_df)} rader, marknad stängd exkluderad). "
+                f"Test: {test_df['date'].min()}–{test_df['date'].max()} "
+                f"({len(test_df)} rader). Baseline: {baseline_label}."
+            )
+            st.caption(
+                "Modellen tränades på: "
+                + ", ".join(LABELS.get(c, c) for c in used_feature_cols)
+            )
+
+            metrics_df = pd.DataFrame(eval_result.metrics).rename(
+                columns={"model": "Modell", "baseline": "Baseline"},
+                index={"rmse": "RMSE", "mae": "MAE"},
+            )
+            st.dataframe(metrics_df, use_container_width=True)
+
+            st.subheader("Residualanalys (testdata)")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption("Residual vs. prediktion")
+                st.scatter_chart(test_df, x=f"predicted_{used_target}", y="residual")
+            with col2:
+                st.caption("Residual över tid")
+                st.line_chart(test_df.set_index("date")["residual"])
+
+            st.caption("Histogram över residualer")
+            counts, bin_edges = np.histogram(test_df["residual"], bins=20)
+            hist_df = pd.DataFrame(
+                {"Antal": counts},
+                index=[f"{bin_edges[i]:.3g}" for i in range(len(counts))],
+            )
+            st.bar_chart(hist_df)
+
+            st.subheader("Testdata")
+            st.dataframe(test_df[display_cols], use_container_width=True)
+        else:
+            st.info(
+                "Klicka 'Kör evaluering' för att träna och utvärdera på test-split."
+            )
     else:
         st.info("Välj minst en feature.")
