@@ -15,7 +15,8 @@ from we_love_shorting import controller, features
 
 logging.basicConfig(level=logging.INFO)
 
-st.title("we_love_shorting — price → news-tone signal")
+st.markdown("### 📉 we_love_shorting")
+st.title("Price → news-tone signal")
 st.caption(
     "SPY + precious-metal + oil prices → predicted news tone. Low tone = bearish."
 )
@@ -39,6 +40,9 @@ LABELS = {
 # Model roadmap: only Linear Regression is implemented (signal_model.py).
 # The others are shown so the UI already has a place for them once built.
 MODELS = ["Linear Regression", "Ridge Regression 🔒", "Random Forest 🔒"]
+
+# Chart timespan filter: trading days to show, counting back from the latest row.
+TIMESPANS = {"Vecka": 5, "Månad": 21, "År": 252, "Allt": None}
 
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
@@ -89,6 +93,7 @@ with st.sidebar:
 
 if "df" in st.session_state:
     df = st.session_state["df"]
+    st.caption(f"✅ Data laddad: {df['date'].min()} → {df['date'].max()}")
     # numeric columns are the feature/target menu; drop bookkeeping columns
     candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
 
@@ -136,10 +141,14 @@ if "df" in st.session_state:
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
         actual, pred = f"Faktisk: {name}", f"Prediktion: {name}"
-        chart = out.set_index("date")[[target, f"predicted_{target}"]].rename(
+        chart_slot = st.empty()  # reserved above the timespan picker, filled below
+        timespan = st.radio("Visa", list(TIMESPANS), index=3, horizontal=True)
+        days = TIMESPANS[timespan]
+        windowed = out if days is None else out.tail(days)
+        chart = windowed.set_index("date")[[target, f"predicted_{target}"]].rename(
             columns={target: actual, f"predicted_{target}": pred}
         )
-        st.line_chart(chart, color=["#4c78a8", "#f58518"])
+        chart_slot.line_chart(chart, color=["#4c78a8", "#f58518"])
         styled = out.style.apply(
             lambda row: (
                 ["background-color: #5a1f1f" if row.get("market_closed") else ""]
