@@ -17,7 +17,11 @@ TICKERS = {
 }
 # Every measured value the model can use. tone (GDELT) is one column in the pool
 # beside the price columns — any of them can be the TARGET or a FEATURE.
-COLUMNS = ["tone", *(f"{stem}_close" for stem in TICKERS)]
+COLUMNS = [
+    "tone",
+    *(f"{stem}_close" for stem in TICKERS),
+    *(f"{stem}_ret" for stem in TICKERS),
+]
 TARGET = "tone"  # default target (swappable in the UI)
 FEATURES = [c for c in COLUMNS if c != TARGET]  # default: predict from all the rest
 
@@ -32,11 +36,25 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
     inherits the most recent price block via an asof (backward) join — Friday's
     close carries over the weekend.
 
+    Each stream also gets a `<stem>_ret` column: that day's percentage change,
+    computed on the stream's OWN rows (its own trading calendar) before the
+    outer-merge/ffill below. Computing it here, not after ffill on the merged
+    table, matters: after ffill a closed day's close equals the prior day's
+    close, so a naive post-merge pct_change() would read as a flat 0% on every
+    day that exchange was shut, which is wrong — the real return is whatever it
+    was on the last actual trading day, carried forward (see the ffill note
+    below), not zero.
+
     `market_closed` flags carried-forward closes against ONE reference calendar
     (the first stream, i.e. the S&P 500 / US market) — a foreign exchange trading
     on a US holiday must not un-flag that carried-forward US close.
     """
-    frames = list(prices.values())
+    frames = []
+    for stem, frame in prices.items():
+        frame = frame.copy()
+        # own trading calendar, pre-merge: see the `_ret` note above.
+        frame[f"{stem}_ret"] = frame[f"{stem}_close"].pct_change()
+        frames.append(frame)
     ref_dates = pd.to_datetime(frames[0]["date"])  # reference market's trading days
     merged = frames[0]
     for frame in frames[1:]:
@@ -51,10 +69,22 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
     # ponytail: ffill carries a paused/delisted stream's last close forward
     # indefinitely; add a max-carry-forward staleness guard if a feed goes dark.
     merged = merged.ffill()  # carry each stream's last close over its own closed days
+    # ffill also carries each `_ret` forward unchanged on closed days: the carried
+    # value is that stream's last real trading day's return, not 0% and not a
+    # freshly computed one — same carry-forward behavior as `_close` above, called
+    # out here since it's easy to assume ffill only touches price levels.
     tone = tone.sort_values("date")
     tone["date"] = pd.to_datetime(tone["date"])
     df = (
         pd.merge_asof(tone, merged, on="date", direction="backward")
+        # dropna is unconditional over every registered column, not just
+        # whatever TARGET/FEATURES the caller later picks in the UI — that's
+        # pre-existing behavior, not new. `_ret` widens its reach by one known,
+        # accepted cost: the very first stored day of history has no prior
+        # close, so its `_ret` is NaN and that day gets dropped too. Treated as
+        # a one-time PoC-stage simplification rather than teaching this
+        # function about the target/features choice (which controller.get_data
+        # caches before that choice is even made).
         .dropna()
         .reset_index(drop=True)
     )
