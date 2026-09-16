@@ -1,10 +1,11 @@
 """Controller: wire the separate sources -> DB -> features -> ML -> results."""
 
 import logging
+from dataclasses import dataclass
 
 import pandas as pd
 
-from . import db, features, signal_model
+from . import db, evaluation, features, signal_model
 from .sources import gdelt, yahoo
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,55 @@ def run(
     model = signal_model.train(df, feature_cols, target, persist=False)
     df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
     return df
+
+
+@dataclass
+class EvaluationResult:
+    """Chronological train/test evaluation output: the test set carries the
+    model's predictions and the naive baseline's side by side (plus each
+    one's residual), and `metrics` holds both sides' RMSE/MAE.
+    """
+
+    train_df: pd.DataFrame
+    test_df: pd.DataFrame
+    baseline_kind: str
+    metrics: dict[str, dict[str, float]]
+
+
+def evaluate(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+    test_frac: float = 0.2,
+) -> EvaluationResult:
+    """Chronologically split `df`, train on the train split only, and compare
+    the model's held-out test predictions against a naive baseline.
+
+    Market-closed (carry-forward) rows are dropped before the split — see
+    evaluation.drop_market_closed — since ffill duplicates `_close`/`_ret`
+    across closed days while `tone` keeps changing, which would otherwise
+    teach the model an artificial repeated relationship. This is separate
+    from run(), which trains on every row for the live chart.
+    """
+    clean = evaluation.drop_market_closed(df)
+    train_df, test_df = evaluation.chronological_split(clean, test_frac)
+
+    model = signal_model.train(train_df, feature_cols, target, persist=False)
+    predicted = signal_model.predict(test_df, model, feature_cols)
+    baseline = evaluation.naive_baseline(train_df[target], test_df[target])
+
+    test_df[f"predicted_{target}"] = predicted
+    test_df[f"baseline_{target}"] = baseline
+    test_df["residual"] = evaluation.residuals(test_df[target], predicted)
+    test_df["baseline_residual"] = evaluation.residuals(test_df[target], baseline)
+
+    metrics = {
+        "model": evaluation.regression_metrics(test_df[target], predicted),
+        "baseline": evaluation.regression_metrics(test_df[target], baseline),
+    }
+    return EvaluationResult(
+        train_df, test_df, evaluation.baseline_kind(target), metrics
+    )
 
 
 if __name__ == "__main__":  # one-time backfill: python -m we_love_shorting.controller
