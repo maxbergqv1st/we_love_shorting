@@ -114,6 +114,15 @@ if "df" in st.session_state:
             f"🧠 Tränar **Linear Regression** → förutsäger **{name}** från {feature_names}"
         )
         out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
+        latest = out.iloc[-1]
+        col1, col2, col3 = st.columns(3)
+        col1.metric(f"Senaste faktiska: {name}", f"{latest[target]:.2f}")
+        col2.metric(
+            f"Senaste prediktion: {name}", f"{latest[f'predicted_{target}']:.2f}"
+        )
+        col3.metric(
+            "Differens", f"{latest[f'predicted_{target}'] - latest[target]:.2f}"
+        )
         # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
