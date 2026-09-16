@@ -20,7 +20,9 @@ st.caption(
     "SPY + precious-metal + oil prices → predicted news tone. Low tone = bearish."
 )
 
-query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
+with st.sidebar:
+    st.header("Inställningar")
+    query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
 
 # Readable labels for the fixed streams; keys are the DataFrame columns.
 LABELS = {
@@ -63,42 +65,47 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
         st.success("Klart. Klicka 'Ladda data' för att träna på den.")
 
 
-if st.button("Första fyllning (5 år)"):
-    fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
+with st.sidebar:
+    if st.button("Första fyllning (5 år)"):
+        fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
 
-if st.button("Fyll på till idag"):
-    fill(
-        "Hämtar från senaste lagrade datum till idag…", lambda: controller.update(query)
-    )
-
-if st.button("Ladda data"):
-    try:
-        st.session_state["df"] = get_data()
-    except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
-        st.error(
-            f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+    if st.button("Fyll på till idag"):
+        fill(
+            "Hämtar från senaste lagrade datum till idag…",
+            lambda: controller.update(query),
         )
+
+    if st.button("Ladda data"):
+        try:
+            st.session_state["df"] = get_data()
+        except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
+            st.error(
+                f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+            )
 
 if "df" in st.session_state:
     df = st.session_state["df"]
     # numeric columns are the feature/target menu; drop bookkeeping columns
     candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
 
-    st.subheader("Vad ska modellen förutsäga?")
-    default_target = features.TARGET if features.TARGET in candidates else candidates[0]
-    target = st.selectbox(
-        "TARGET (faktiskt värde att förutsäga)",
-        candidates,
-        index=candidates.index(default_target),
-        format_func=lambda c: LABELS.get(c, c),
-    )
-    feature_opts = [c for c in candidates if c != target]
-    feature_cols = st.multiselect(
-        "FEATURES (förutsäg från dessa)",
-        feature_opts,
-        default=feature_opts,  # start with everything else selected
-        format_func=lambda c: LABELS.get(c, c),
-    )
+    with st.sidebar:
+        st.subheader("Vad ska modellen förutsäga?")
+        default_target = (
+            features.TARGET if features.TARGET in candidates else candidates[0]
+        )
+        target = st.selectbox(
+            "TARGET (faktiskt värde att förutsäga)",
+            candidates,
+            index=candidates.index(default_target),
+            format_func=lambda c: LABELS.get(c, c),
+        )
+        feature_opts = [c for c in candidates if c != target]
+        feature_cols = st.multiselect(
+            "FEATURES (förutsäg från dessa)",
+            feature_opts,
+            default=feature_opts,  # start with everything else selected
+            format_func=lambda c: LABELS.get(c, c),
+        )
 
     if feature_cols:
         name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
