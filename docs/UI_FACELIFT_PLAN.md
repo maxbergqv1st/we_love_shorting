@@ -28,10 +28,13 @@ löser det.
    till sidopanelen. Huvudytan visar bara resultat (graf, tabell, banner).
 4. **Snabb-metrics** — `st.metric`-kort ovanför grafen (senaste faktiska
    värde, senaste prediktion, differens).
-5. **Modellväljare (skuggad)** — en väljare med Linear Regression aktiv och
-   framtida alternativ (Random Forest, Ridge) synliga men markerade
-   "kommer snart" / inaktiverade. Förbereder UI:t för nästa persons jobb
-   (modelljämförelse) utan att bygga den logiken nu.
+5. **Modellväljare (skuggad)** — en väljare med tre alternativ:
+   - **Linear Regression** ✅ aktiv (redan implementerad)
+   - **Ridge Regression** 🔒 inaktiverad, "kommer snart"
+   - **Random Forest Regressor** 🔒 inaktiverad, "kommer snart"
+
+   Förbereder UI:t för nästa persons jobb (modelljämförelse) utan att bygga
+   den logiken nu.
 
 ## Vad som INTE rörs
 
