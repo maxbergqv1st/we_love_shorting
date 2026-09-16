@@ -14,9 +14,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from we_love_shorting import controller, features
-from we_love_shorting.sources import yahoo
 from we_love_shorting import chatbot, controller, features
+from we_love_shorting.sources import yahoo
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -31,24 +30,21 @@ with st.sidebar:
     st.header("Inställningar")
     query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
 
-# Readable labels for the fixed streams; keys are the DataFrame columns.
-LABELS = {
-    "tone": "News tone",
-    "sp500_close": "S&P 500",
-    "omx30_close": "OMX Stockholm 30",
-    "eurostoxx_close": "EURO STOXX 50",
-    "gold_close": "Gold",
-    "silver_close": "Silver",
-    "copper_close": "Copper",
-    "oil_close": "Crude oil",
-    "sp500_ret": "S&P 500 (daily % change)",
-    "omx30_ret": "OMX Stockholm 30 (daily % change)",
-    "eurostoxx_ret": "EURO STOXX 50 (daily % change)",
-    "gold_ret": "Gold (daily % change)",
-    "silver_ret": "Silver (daily % change)",
-    "copper_ret": "Copper (daily % change)",
-    "oil_ret": "Crude oil (daily % change)",
+# Human names per stream stem; the _close/_ret column labels derive from these
+# so the two never drift apart when a ticker is added.
+STREAM_NAMES = {
+    "sp500": "S&P 500",
+    "omx30": "OMX Stockholm 30",
+    "eurostoxx": "EURO STOXX 50",
+    "gold": "Gold",
+    "silver": "Silver",
+    "copper": "Copper",
+    "oil": "Crude oil",
 }
+LABELS = {"tone": "News tone"}
+for _stem, _name in STREAM_NAMES.items():
+    LABELS[f"{_stem}_close"] = _name
+    LABELS[f"{_stem}_ret"] = f"{_name} (daily % change)"
 
 # Model roadmap: only Linear Regression is implemented (signal_model.py).
 # The others are shown so the UI already has a place for them once built.
@@ -237,7 +233,10 @@ if "df" in st.session_state:
         # series name — the explicit list then pins actual=blue, prediction=orange.
         actual, pred = f"Faktisk: {name}", f"Prediktion: {name}"
         chart_slot = st.empty()  # reserved above the timespan picker, filled below
-        timespan = st.radio("Visa", list(TIMESPANS), index=3, horizontal=True)
+        # `or "Allt"` keeps a selection even if the user deselects the control.
+        timespan = (
+            st.segmented_control("Visa", list(TIMESPANS), default="Allt") or "Allt"
+        )
         days = TIMESPANS[timespan]
         windowed = out if days is None else out.tail(days)
         chart = windowed.set_index("date")[[target, f"predicted_{target}"]].rename(
@@ -253,7 +252,7 @@ if "df" in st.session_state:
         )  # market_closed drives the row colour; hidden via column_config
         st.dataframe(
             styled,
-            use_container_width=True,
+            width="stretch",
             column_config={"market_closed": None},  # None = hide, Styler still reads it
         )
         st.caption(
@@ -277,7 +276,9 @@ if "df" in st.session_state:
             used_target = st.session_state["eval_target"]
             used_feature_cols = st.session_state["eval_feature_cols"]
 
-            if used_target != target or used_feature_cols != feature_cols:
+            # compare as sets: reselecting the same features in a different order
+            # doesn't change the model, so it shouldn't flag the eval as stale.
+            if used_target != target or set(used_feature_cols) != set(feature_cols):
                 st.info(
                     "Valen ovan har ändrats sedan senaste evalueringen — "
                     "resultaten nedan gäller fortfarande föregående val. "
@@ -315,7 +316,7 @@ if "df" in st.session_state:
                 columns={"model": "Modell", "baseline": "Baseline"},
                 index={"rmse": "RMSE", "mae": "MAE"},
             )
-            st.dataframe(metrics_df, use_container_width=True)
+            st.dataframe(metrics_df, width="stretch")
 
             st.subheader("Residualanalys (testdata)")
             col1, col2 = st.columns(2)
@@ -328,14 +329,16 @@ if "df" in st.session_state:
 
             st.caption("Histogram över residualer")
             counts, bin_edges = np.histogram(test_df["residual"], bins=20)
+            # bin midpoints as a numeric index: always distinct (unlike the
+            # rounded left-edge strings, which could collide for tiny residuals).
+            mids = (bin_edges[:-1] + bin_edges[1:]) / 2
             hist_df = pd.DataFrame(
-                {"Antal": counts},
-                index=[f"{bin_edges[i]:.3g}" for i in range(len(counts))],
+                {"Antal": counts}, index=pd.Index(mids, name="Residual")
             )
             st.bar_chart(hist_df)
 
             st.subheader("Testdata")
-            st.dataframe(test_df[display_cols], use_container_width=True)
+            st.dataframe(test_df[display_cols], width="stretch")
 
             st.subheader("💬 Fråga om resultatet")
             st.caption(

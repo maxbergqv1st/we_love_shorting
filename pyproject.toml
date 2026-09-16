@@ -19,3 +19,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.mypy]
+# pandas/sklearn/joblib/yfinance ship no type stubs; don't drown real errors.
+ignore_missing_imports = true
