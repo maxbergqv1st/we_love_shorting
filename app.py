@@ -36,6 +36,10 @@ LABELS = {
     "oil_close": "Crude oil",
 }
 
+# Model roadmap: only Linear Regression is implemented (signal_model.py).
+# The others are shown so the UI already has a place for them once built.
+MODELS = ["Linear Regression", "Ridge Regression 🔒", "Random Forest 🔒"]
+
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
 
@@ -89,6 +93,11 @@ if "df" in st.session_state:
     candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
 
     with st.sidebar:
+        st.subheader("Modell")
+        model_choice = st.selectbox("MODELL", MODELS)
+        if model_choice != "Linear Regression":
+            st.caption("🔒 Kommer snart — kör Linear Regression tills vidare.")
+
         st.subheader("Vad ska modellen förutsäga?")
         default_target = (
             features.TARGET if features.TARGET in candidates else candidates[0]
