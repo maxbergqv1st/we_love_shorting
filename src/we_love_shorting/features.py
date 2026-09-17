@@ -31,10 +31,7 @@ def stream_of(column: str) -> str:
     `sp500`; `tone` maps to itself. Lets the UI treat a stream's level and return
     as one group, so picking either as the target excludes both from features
     (a stream must not predict itself via its own level/return)."""
-    for suffix in ("_close", "_ret"):
-        if column.endswith(suffix):
-            return column[: -len(suffix)]
-    return column
+    return column.removesuffix("_close").removesuffix("_ret")
 
 
 def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:

@@ -77,9 +77,9 @@ def naive_baseline(train_target: pd.Series, test_target: pd.Series) -> pd.Series
     """
     if baseline_kind(train_target.name) == "mean":
         return pd.Series(train_target.mean(), index=test_target.index, name="baseline")
-    seed = pd.Series([train_target.iloc[-1]])
-    shifted = pd.concat([seed, test_target.iloc[:-1]], ignore_index=True)
-    return pd.Series(shifted.to_numpy(), index=test_target.index, name="baseline")
+    shifted = test_target.shift(1)  # each row predicted by the previous actual
+    shifted.iloc[0] = train_target.iloc[-1]  # first test row has no in-test predecessor
+    return shifted.rename("baseline")
 
 
 def regression_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
