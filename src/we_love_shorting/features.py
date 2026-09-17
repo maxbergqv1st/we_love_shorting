@@ -34,15 +34,35 @@ def stream_of(column: str) -> str:
     return column.removesuffix("_close").removesuffix("_ret")
 
 
+def display_column(target: str) -> str:
+    """The column to show/reconstruct for a target: a `_ret` target maps to its
+    stream's `_close` (the price line the chart draws from the predicted return);
+    any other target shows itself. One home for the _ret->_close convention used
+    by controller.run (reconstruction) and the UI (chart/metrics)."""
+    return f"{stream_of(target)}_close" if target.endswith("_ret") else target
+
+
+def reconstruct_close(close: pd.Series, predicted_ret: pd.Series) -> pd.Series:
+    """Walk-forward price from a predicted daily return: yesterday's ACTUAL
+    close × (1 + today's prediction). One-step, so errors don't accumulate.
+    First row is NaN (no prior close). Lets the model stay in stationary
+    returns (clean residuals) while the chart still shows a price line."""
+    return close.shift(1) * (1 + predicted_ret)
+
+
 def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Join every price stream + news tone by date into one wide table.
 
     The streams trade on different calendars (US, Stockholm, Europe, commodities),
     so an inner join would drop every day any one exchange was closed. Instead we
     outer-merge and forward-fill: a day one exchange is shut inherits that
-    exchange's most recent close. News tone flows daily, so each tone date then
-    inherits the most recent price block via an asof (backward) join — Friday's
-    close carries over the weekend.
+    exchange's most recent close. The row backbone is every date the prices OR
+    tone touch, so pre-tone price history survives (tone is just NaN there); an
+    asof (backward) join carries the most recent price block and the most recent
+    tone onto each date — Friday's close over the weekend, NaN tone before GDELT's
+    coverage begins. Rows are gated only on the price columns, so a returns-only
+    model keeps the full history; tone/target NaNs are dropped per-model at fit
+    time (see signal_model.train / controller.evaluate).
 
     Each stream also gets a `<stem>_ret` column: that day's percentage change,
     computed on the stream's OWN rows (its own trading calendar) before the
@@ -83,21 +103,22 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
     # out here since it's easy to assume ffill only touches price levels.
     tone = tone.sort_values("date")
     tone["date"] = pd.to_datetime(tone["date"])
-    df = (
-        pd.merge_asof(tone, merged, on="date", direction="backward")
-        # dropna is unconditional over every registered column, not just
-        # whatever TARGET/FEATURES the caller later picks in the UI — that's
-        # pre-existing behavior, not new. `_ret` widens its reach by one known,
-        # accepted cost: the very first stored day of history has no prior
-        # close, so its `_ret` is NaN and that day gets dropped too. Treated as
-        # a one-time PoC-stage simplification rather than teaching this
-        # function about the target/features choice (which controller.get_data
-        # caches before that choice is even made).
-        .dropna()
-        .reset_index(drop=True)
+    # Backbone = every date the prices OR tone touch, so pre-tone trading history
+    # survives. asof carries the most recent price block + most recent tone onto
+    # each date (Friday's close over the weekend; NaN tone before GDELT starts).
+    dates = pd.Index(merged["date"]).union(tone["date"])  # sorted, deduped union
+    df = pd.merge_asof(
+        pd.DataFrame({"date": dates}), merged, on="date", direction="backward"
     )
+    df = pd.merge_asof(df, tone, on="date", direction="backward")
+    # Gate on the price columns only: this drops the priming first row (its `_ret`
+    # is NaN) and any date before a stream has data. tone is intentionally allowed
+    # to stay NaN — it's dropped per-model at fit time, so a `_ret`-only model
+    # keeps the full price history while a tone pick trims to tone's coverage.
+    price_cols = [f"{s}_close" for s in prices] + [f"{s}_ret" for s in prices]
+    df = df.dropna(subset=price_cols).reset_index(drop=True)
     if df.empty:
-        raise ValueError("no overlapping dates across prices and tone")
+        raise ValueError("no price data to build features from")
     # closed = price block was carried forward from an earlier trading day
     df["market_closed"] = df["date"] != df["market_date"]
     # The latest date is "today": a carried-forward close there just means the

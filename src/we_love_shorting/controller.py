@@ -40,7 +40,7 @@ def _fetch_all(specs: dict) -> tuple[dict, dict]:
 def _sources(query: str, *, incremental: bool) -> dict:
     """Every stream keyed by its DB table -> a fetch-callable. Tone (GDELT) sits
     beside the price streams (Yahoo); only its data source differs. `incremental`
-    fetches from each table's last stored date; otherwise a full ~5y / rolling
+    fetches from each table's last stored date; otherwise a full ~10y / rolling
     backfill.
     """
     src: dict[str, Callable[..., pd.DataFrame]] = {}
@@ -51,16 +51,18 @@ def _sources(query: str, *, incremental: bool) -> dict:
                 t, value_col=c, start=db.last_date(s)
             )
         else:
-            src[stem] = lambda t=ticker, c=col: yahoo.fetch_prices(t, "5y", c)
+            src[stem] = lambda t=ticker, c=col: yahoo.fetch_prices(t, "10y", c)
     if incremental:
         src["tone"] = lambda: gdelt.fetch_tone(query, start=db.last_date("tone"))
     else:
-        src["tone"] = lambda: gdelt.fetch_tone(query, timespan="60m")
+        # 120 months to match the 10y price backfill; GDELT DOC only indexes
+        # ~2017 on, so tone still floors there (the chart starts at that overlap).
+        src["tone"] = lambda: gdelt.fetch_tone(query, timespan="120m")
     return src
 
 
 def backfill(query: str = "recession") -> tuple[dict, dict]:
-    """First fill: pull ~5 years of history for every stream into the DB. Tickers
+    """First fill: pull ~10 years of history for every stream into the DB. Tickers
     are fixed in features.TICKERS (the UI no longer asks). GDELT tone only covers
     a rolling window (~2017 on), so its table may start later than the price
     history. Run once, then keep it current with update().
@@ -99,6 +101,11 @@ def run(
     """
     model = signal_model.train(df, feature_cols, target, persist=False)
     df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
+    if target.endswith("_ret"):  # rebuild a price line from the predicted change
+        close = features.display_column(target)
+        df[f"predicted_{close}"] = features.reconstruct_close(
+            df[close], df[f"predicted_{target}"]
+        )
     return df
 
 
@@ -131,6 +138,9 @@ def evaluate(
     from run(), which trains on every row for the live chart.
     """
     clean = evaluation.drop_market_closed(df)
+    # Drop rows this pick can't use (NaN tone/target before its coverage): a
+    # returns-only model keeps the full price history, a tone pick trims to ~2017.
+    clean = clean.dropna(subset=[*feature_cols, target]).reset_index(drop=True)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
     model = signal_model.train(train_df, feature_cols, target, persist=False)
