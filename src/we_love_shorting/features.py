@@ -26,6 +26,17 @@ TARGET = "tone"  # default target (swappable in the UI)
 FEATURES = [c for c in COLUMNS if c != TARGET]  # default: predict from all the rest
 
 
+def stream_of(column: str) -> str:
+    """The stream a column belongs to: `sp500_close` and `sp500_ret` both map to
+    `sp500`; `tone` maps to itself. Lets the UI treat a stream's level and return
+    as one group, so picking either as the target excludes both from features
+    (a stream must not predict itself via its own level/return)."""
+    for suffix in ("_close", "_ret"):
+        if column.endswith(suffix):
+            return column[: -len(suffix)]
+    return column
+
+
 def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Join every price stream + news tone by date into one wide table.
 
