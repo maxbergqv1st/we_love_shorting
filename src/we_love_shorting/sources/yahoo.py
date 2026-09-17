@@ -24,13 +24,9 @@ def fetch_prices(
     """
     import yfinance as yf
 
-    hist = yf.Ticker(symbol)
-    if start is not None:
-        log.info("yfinance fetch: %s (from %s)", symbol, start)
-        df = hist.history(start=start).reset_index()
-    else:
-        log.info("yfinance fetch: %s (%s)", symbol, period)
-        df = hist.history(period=period).reset_index()
+    window = {"start": start} if start is not None else {"period": period}
+    log.info("yfinance fetch: %s (%s)", symbol, start or period)
+    df = yf.Ticker(symbol).history(**window).reset_index()
     if df.empty:
         if start is not None:  # incremental: no new trading days -> not an error
             return pd.DataFrame(columns=["date", value_col])

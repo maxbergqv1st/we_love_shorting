@@ -1,6 +1,7 @@
 """Controller: wire the separate sources -> DB -> features -> ML -> results."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -42,7 +43,7 @@ def _sources(query: str, *, incremental: bool) -> dict:
     fetches from each table's last stored date; otherwise a full ~5y / rolling
     backfill.
     """
-    src = {}
+    src: dict[str, Callable[..., pd.DataFrame]] = {}
     for stem, ticker in features.TICKERS.items():
         col = f"{stem}_close"
         if incremental:

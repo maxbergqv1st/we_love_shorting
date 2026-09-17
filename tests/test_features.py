@@ -4,6 +4,13 @@ import pytest
 from we_love_shorting import features
 
 
+def test_stream_of_groups_close_and_ret():
+    # a stream's level and return map to the same stream; tone stands alone.
+    assert features.stream_of("sp500_close") == "sp500"
+    assert features.stream_of("sp500_ret") == "sp500"
+    assert features.stream_of("tone") == "tone"
+
+
 def test_build_features_joins_streams_and_targets_tone():
     # day0 primes pct_change (a stream's first-ever row has no prior close, so
     # its `_ret` is NaN and the row gets dropped) — day0 isn't a tone date, so

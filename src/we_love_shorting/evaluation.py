@@ -20,6 +20,13 @@ def drop_market_closed(df: pd.DataFrame) -> pd.DataFrame:
     daily. Training on those rows would teach the model a duplicated,
     artificial relationship instead of genuine day-over-day signal.
 
+    `market_closed` tracks ONE reference calendar (the S&P 500 / US market),
+    so this drop is a proxy that removes the dominant staleness case. A foreign
+    stream (gold, OMX, ...) closed on a day the US traded still carries a ffill'd
+    `_ret`/`_close` on a kept row. That's accepted feature noise, not test
+    leakage — a per-stream staleness model would either drop far more rows or
+    thread a mask through the whole pipeline, not worth it at PoC scale.
+
     Eval-only: the live chart (controller.run) intentionally keeps every row,
     closed-market included, so this must not run there.
     """
@@ -70,9 +77,9 @@ def naive_baseline(train_target: pd.Series, test_target: pd.Series) -> pd.Series
     """
     if baseline_kind(train_target.name) == "mean":
         return pd.Series(train_target.mean(), index=test_target.index, name="baseline")
-    seed = pd.Series([train_target.iloc[-1]])
-    shifted = pd.concat([seed, test_target.iloc[:-1]], ignore_index=True)
-    return pd.Series(shifted.to_numpy(), index=test_target.index, name="baseline")
+    shifted = test_target.shift(1)  # each row predicted by the previous actual
+    shifted.iloc[0] = train_target.iloc[-1]  # first test row has no in-test predecessor
+    return shifted.rename("baseline")
 
 
 def regression_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
