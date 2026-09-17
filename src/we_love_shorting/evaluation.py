@@ -20,6 +20,13 @@ def drop_market_closed(df: pd.DataFrame) -> pd.DataFrame:
     daily. Training on those rows would teach the model a duplicated,
     artificial relationship instead of genuine day-over-day signal.
 
+    `market_closed` tracks ONE reference calendar (the S&P 500 / US market),
+    so this drop is a proxy that removes the dominant staleness case. A foreign
+    stream (gold, OMX, ...) closed on a day the US traded still carries a ffill'd
+    `_ret`/`_close` on a kept row. That's accepted feature noise, not test
+    leakage — a per-stream staleness model would either drop far more rows or
+    thread a mask through the whole pipeline, not worth it at PoC scale.
+
     Eval-only: the live chart (controller.run) intentionally keeps every row,
     closed-market included, so this must not run there.
     """
