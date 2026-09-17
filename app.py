@@ -27,8 +27,9 @@ with st.sidebar:
     st.header("Inställningar")
     query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
 
-# Human names per stream stem; the _close/_ret column labels derive from these
-# so the two never drift apart when a ticker is added.
+# Human names per stream stem (features.TICKERS is the source of the stem set,
+# so a new ticker always gets label entries — unnamed here, it falls back to the
+# stem). The _close/_ret labels derive from one name so they never drift apart.
 STREAM_NAMES = {
     "sp500": "S&P 500",
     "omx30": "OMX Stockholm 30",
@@ -39,7 +40,8 @@ STREAM_NAMES = {
     "oil": "Crude oil",
 }
 LABELS = {"tone": "News tone"}
-for _stem, _name in STREAM_NAMES.items():
+for _stem in features.TICKERS:
+    _name = STREAM_NAMES.get(_stem, _stem)
     LABELS[f"{_stem}_close"] = _name
     LABELS[f"{_stem}_ret"] = f"{_name} (daily % change)"
 
