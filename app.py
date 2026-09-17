@@ -120,10 +120,18 @@ if "df" in st.session_state:
             format_func=lambda c: LABELS.get(c, c),
         )
         feature_opts = [c for c in candidates if c != target]
+        # Persist the picks across reruns (key=), starting with everything
+        # selected, then prune anything no longer valid — crucially the current
+        # target, so choosing a column as target auto-drops it from features
+        # while keeping the rest of the selection intact.
+        st.session_state.setdefault("feature_cols", feature_opts)
+        st.session_state["feature_cols"] = [
+            c for c in st.session_state["feature_cols"] if c in feature_opts
+        ]
         feature_cols = st.multiselect(
             "FEATURES (förutsäg från dessa)",
             feature_opts,
-            default=feature_opts,  # start with everything else selected
+            key="feature_cols",
             format_func=lambda c: LABELS.get(c, c),
         )
 
