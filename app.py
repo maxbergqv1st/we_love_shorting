@@ -200,7 +200,10 @@ if "df" in st.session_state:
             index=candidates.index(default_target),
             format_func=lambda c: LABELS.get(c, c),
         )
-        feature_opts = [c for c in candidates if c != target]
+        # Exclude the target's whole stream: choosing sp500_close (or _ret) as
+        # target drops both sp500_close and sp500_ret from the features.
+        target_stream = features.stream_of(target)
+        feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
         # Persist the picks across reruns (key=), starting with everything
         # selected, then prune anything no longer valid — crucially the current
         # target, so choosing a column as target auto-drops it from features
