@@ -82,8 +82,8 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
 
 
 with st.sidebar:
-    if st.button("Första fyllning (5 år)"):
-        fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
+    if st.button("Första fyllning (10 år)"):
+        fill("Hämtar ~10 års historik…", lambda: controller.backfill(query))
 
     if st.button("Fyll på till idag"):
         fill(
@@ -102,8 +102,15 @@ with st.sidebar:
 if "df" in st.session_state:
     df = st.session_state["df"]
     st.caption(f"✅ Data laddad: {df['date'].min()} → {df['date'].max()}")
-    # numeric columns are the feature/target menu; drop bookkeeping columns
-    candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
+    # Feature/target menu = numeric columns, minus bookkeeping (market_closed) and
+    # the non-stationary price LEVELS (_close): the model runs on daily change
+    # (_ret) + tone only, for honest residuals. _close stays in df for the chart's
+    # reconstructed price line (controller.run).
+    candidates = [
+        c
+        for c in df.select_dtypes("number").columns
+        if c != "market_closed" and not c.endswith("_close")
+    ]
 
     with st.sidebar:
         st.subheader("Modell")
@@ -147,19 +154,20 @@ if "df" in st.session_state:
             f"🧠 Tränar **Linear Regression** → förutsäger **{name}** från {feature_names}"
         )
         out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
+        # The model predicts a _ret; show the reconstructed price line instead of the
+        # raw % so the live panel reads in kronor/dollar (controller.run adds it).
+        display_col = features.display_column(target)
+        display_pred = f"predicted_{display_col}"
+        disp_name = LABELS.get(display_col, display_col)
         latest = out.iloc[-1]
         col1, col2, col3 = st.columns(3)
-        col1.metric(f"Senaste faktiska: {name}", f"{latest[target]:.2f}")
-        col2.metric(
-            f"Senaste prediktion: {name}", f"{latest[f'predicted_{target}']:.2f}"
-        )
-        col3.metric(
-            "Differens", f"{latest[f'predicted_{target}'] - latest[target]:.2f}"
-        )
+        col1.metric(f"Senaste faktiska: {disp_name}", f"{latest[display_col]:.2f}")
+        col2.metric(f"Senaste prediktion: {disp_name}", f"{latest[display_pred]:.2f}")
+        col3.metric("Differens", f"{latest[display_pred] - latest[display_col]:.2f}")
         # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
-        actual, pred = f"Faktisk: {name}", f"Prediktion: {name}"
+        actual, pred = f"Faktisk: {disp_name}", f"Prediktion: {disp_name}"
         chart_slot = st.empty()  # reserved above the timespan picker, filled below
         # `or "Allt"` keeps a selection even if the user deselects the control.
         timespan = (
@@ -167,10 +175,15 @@ if "df" in st.session_state:
         )
         days = TIMESPANS[timespan]
         windowed = out if days is None else out.tail(days)
-        chart = windowed.set_index("date")[[target, f"predicted_{target}"]].rename(
-            columns={target: actual, f"predicted_{target}": pred}
+        chart = windowed.set_index("date")[[display_col, display_pred]].rename(
+            columns={display_col: actual, display_pred: pred}
         )
         chart_slot.line_chart(chart, color=["#4c78a8", "#f58518"])
+        if target.endswith("_ret"):
+            st.caption(
+                "📈 Priset är rekonstruerat från förutsagd dagsförändring "
+                "(gårdagens faktiska close × (1 + prediktion))."
+            )
         styled = out.style.apply(
             lambda row: (
                 ["background-color: #5a1f1f" if row.get("market_closed") else ""]

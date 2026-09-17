@@ -19,7 +19,8 @@ def train(
     persist: bool = True,
 ) -> LinearRegression:
     model = LinearRegression()  # OLS is scale-invariant, so no StandardScaler needed
-    model.fit(df[features], df[target])
+    fit = df.dropna(subset=[*features, target])  # a _ret-only pick keeps all rows;
+    model.fit(fit[features], fit[target])  # tone is NaN before its coverage starts
     if persist:  # skip the disk write on interactive re-fits (see controller.run)
         MODEL_PATH.parent.mkdir(exist_ok=True)
         joblib.dump(model, MODEL_PATH)
@@ -33,4 +34,7 @@ def predict(
 ) -> pd.Series:
     if model is None:
         model = joblib.load(MODEL_PATH)
-    return pd.Series(model.predict(df[features]), index=df.index, name="predicted")
+    usable = df.dropna(subset=features)  # rows the model can score (tone may be NaN)
+    preds = model.predict(usable[features])
+    out = pd.Series(preds, index=usable.index, name="predicted")
+    return out.reindex(df.index)  # NaN back where a feature was missing

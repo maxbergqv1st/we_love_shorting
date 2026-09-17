@@ -4,6 +4,16 @@ import pytest
 from we_love_shorting import features
 
 
+def test_reconstruct_close():
+    # walk-forward: yesterday's actual close x (1 + predicted return).
+    close = pd.Series([100.0, 110.0, 105.0])
+    ret = pd.Series([float("nan"), 0.1, -0.02])
+    rebuilt = features.reconstruct_close(close, ret)
+    assert pd.isna(rebuilt.iloc[0])  # no prior close to build on
+    assert rebuilt.iloc[1] == pytest.approx(100.0 * 1.1)  # 110
+    assert rebuilt.iloc[2] == pytest.approx(110.0 * 0.98)  # 107.8, not from 105
+
+
 def test_stream_of_groups_close_and_ret():
     # a stream's level and return map to the same stream; tone stands alone.
     assert features.stream_of("sp500_close") == "sp500"
@@ -41,6 +51,26 @@ def test_build_features_joins_streams_and_targets_tone():
     assert set(cols) <= set(df.columns)
     assert df["tone"].tolist() == [1.0, -2.0, 0.5, 3.0]
     assert not df[cols].isna().any().any()
+
+
+def test_price_history_before_tone_kept_with_nan_tone():
+    # Prices start earlier than tone: those early rows must survive (a _ret model
+    # uses the full price history) with tone simply NaN until GDELT coverage.
+    d0, d1, d2, d3, d4 = pd.date_range("2024-01-01", periods=5).date
+    tone = pd.DataFrame({"date": [d3, d4], "tone": [1.0, 2.0]})
+    prices = {
+        "sp500": pd.DataFrame(
+            {"date": [d0, d1, d2, d3, d4], "sp500_close": [100, 101, 102, 103, 104]}
+        ),
+    }
+
+    df = features.build_features(tone, prices).set_index("date")
+
+    # d1..d4 survive (d0 primes pct_change); d1,d2 predate tone -> tone is NaN.
+    assert list(df.index) == [d1, d2, d3, d4]
+    assert df["sp500_ret"].notna().all()  # full return history available
+    assert pd.isna(df.loc[d1, "tone"]) and pd.isna(df.loc[d2, "tone"])
+    assert df.loc[d3, "tone"] == 1.0 and df.loc[d4, "tone"] == 2.0
 
 
 def test_weekend_tone_kept_with_friday_close():
