@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from we_love_shorting import controller, features
+from we_love_shorting import chatbot, controller, features
 
 logging.basicConfig(level=logging.INFO)
 
@@ -250,6 +250,59 @@ if "df" in st.session_state:
 
             st.subheader("Testdata")
             st.dataframe(test_df[display_cols], use_container_width=True)
+
+            st.subheader("💬 Fråga om resultatet")
+            st.caption(
+                "AI-assistent grundad i evalueringen ovan (OpenRouter, gratis-modell)."
+            )
+
+            quick_questions = [
+                "Varför presterar modellen bättre/sämre än baseline?",
+                "Var i testperioden är felen som störst?",
+                "Är modellen tillförlitlig nog att lita på?",
+            ]
+            clicked_question = None
+            for col, q in zip(st.columns(len(quick_questions)), quick_questions):
+                if col.button(q, use_container_width=True):
+                    clicked_question = q
+
+            if "chat_history" not in st.session_state:
+                st.session_state["chat_history"] = []
+
+            for role, text in st.session_state["chat_history"]:
+                with st.chat_message(role):
+                    st.write(text)
+
+            question = clicked_question or st.chat_input(
+                "Ställ en fråga om resultatet…"
+            )
+            if question:
+                api_key = st.secrets.get("OPENROUTER_API_KEY")
+                st.session_state["chat_history"].append(("user", question))
+                with st.chat_message("user"):
+                    st.write(question)
+                with st.chat_message("assistant"):
+                    if not api_key:
+                        answer = (
+                            "Ingen OPENROUTER_API_KEY hittad i .streamlit/secrets.toml."
+                        )
+                        st.error(answer)
+                    else:
+                        context = (
+                            f"Target: {name}. "
+                            f"Features: {feature_names}. "
+                            f"Baseline: {baseline_label}. "
+                            f"Mätvärden (modell vs baseline): {eval_result.metrics}. "
+                            f"Testperiod: {test_df['date'].min()} till "
+                            f"{test_df['date'].max()} ({len(test_df)} rader)."
+                        )
+                        with st.spinner("Tänker…"):
+                            try:
+                                answer = chatbot.ask(api_key, context, question)
+                            except Exception as e:  # noqa: BLE001 - surface any API failure in chat
+                                answer = f"Kunde inte nå AI-tjänsten: {e}"
+                        st.write(answer)
+                st.session_state["chat_history"].append(("assistant", answer))
         else:
             st.info(
                 "Klicka 'Kör evaluering' för att träna och utvärdera på test-split."
