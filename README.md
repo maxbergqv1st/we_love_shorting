@@ -156,6 +156,32 @@ auto-retry behind a short countdown; other errors surface immediately.
 
 ---
 
+## Chatbot: ask about the results
+
+Below the train/test evaluation, a chat panel lets you ask questions about the
+model's performance in plain language — e.g. "why does the model do worse than
+the baseline?" — answered by a free LLM via [OpenRouter](https://openrouter.ai/)
+(`nvidia/nemotron-3-ultra-550b-a55b:free`, with `openai/gpt-5.6-luna` as a
+fallback if the free model fails or returns no answer).
+
+- `src/we_love_shorting/chatbot.py` — a single `ask(api_key, context, question)`
+  function. Plain `urllib` (same pattern as `sources/gdelt.py`, no new
+  dependency) and reuses `retry.py` for transient failures.
+- The **context** sent to the model is built from the already-computed
+  evaluation metrics (RMSE/MAE, baseline, test period) — no extra data fetch or
+  training happens for a chat message.
+- The chatbot is **read-only**: it can only return text. It has no code
+  execution, file, or database access, and can't affect the model, the data,
+  or the rest of the app.
+- Requires your own `OPENROUTER_API_KEY` in `.streamlit/secrets.toml`
+  (git-ignored — never commit it):
+  ```toml
+  OPENROUTER_API_KEY = "sk-or-..."
+  ```
+  Without a key, the panel shows a clear error instead of the chat.
+
+---
+
 ## Known limitations (it's a proof of concept)
 
 - The model currently trains and predicts on the same data, so the accuracy
