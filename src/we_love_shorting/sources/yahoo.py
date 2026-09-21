@@ -38,3 +38,19 @@ def fetch_prices(
     df.columns = [c.lower() for c in df.columns]
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df[["date", "close"]].rename(columns={"close": value_col})
+
+
+def fetch_intraday_price(symbol: str, interval: str = "1m") -> pd.Series:
+    """Latest intraday price for a Yahoo ticker, for a live-preview panel only.
+
+    Not persisted to the DB and not part of the daily-close pipeline above —
+    yfinance intraday quotes are typically ~15 min delayed and only meant as
+    a preliminary glance, not model input.
+    """
+    import yfinance as yf
+
+    log.info("yfinance intraday fetch: %s (%s)", symbol, interval)
+    hist = yf.Ticker(symbol).history(period="1d", interval=interval)
+    if hist.empty:
+        raise ValueError(f"no intraday price data for ticker {symbol!r}")
+    return hist.iloc[-1]
