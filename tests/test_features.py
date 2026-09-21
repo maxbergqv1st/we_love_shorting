@@ -14,6 +14,23 @@ def test_reconstruct_close():
     assert rebuilt.iloc[2] == pytest.approx(110.0 * 0.98)  # 107.8, not from 105
 
 
+def test_forward_target_is_cumulative_return_over_horizon():
+    # h-day forward return of the stream's close: close[t+h]/close[t] - 1.
+    df = pd.DataFrame({"sp500_close": [100.0, 110.0, 121.0, 133.1]})
+    y = features.forward_target(df, "sp500_ret", 2)
+    assert y.iloc[0] == pytest.approx(121.0 / 100.0 - 1)  # 0.21 over 2 days
+    assert y.iloc[1] == pytest.approx(133.1 / 110.0 - 1)  # 0.21
+    assert pd.isna(y.iloc[-1]) and pd.isna(y.iloc[-2])  # last h rows have no future
+
+
+def test_forward_target_non_ret_shifts_value_ahead():
+    # a non-_ret target (tone) forecasts its own value h steps ahead.
+    df = pd.DataFrame({"tone": [1.0, 2.0, 3.0, 4.0]})
+    y = features.forward_target(df, "tone", 1)
+    assert y.tolist()[:3] == [2.0, 3.0, 4.0]  # tomorrow's tone
+    assert pd.isna(y.iloc[-1])
+
+
 def test_stream_of_groups_close_and_ret():
     # a stream's level and return map to the same stream; tone stands alone.
     assert features.stream_of("sp500_close") == "sp500"

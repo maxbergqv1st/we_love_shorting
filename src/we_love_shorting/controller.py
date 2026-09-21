@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
+from sklearn.linear_model import LinearRegression
 
 from . import db, evaluation, features, signal_model
 from .sources import gdelt, yahoo
@@ -89,24 +90,124 @@ def get_data() -> pd.DataFrame:
     return features.build_features(db.load("tone"), prices)
 
 
+def _forward_model(
+    df: pd.DataFrame, feature_cols: list[str], target: str, horizon: int
+) -> LinearRegression:
+    """Fit today's features -> the forward target over `horizon` days, via a
+    throwaway `_fwd` label column. Shared by run() and forecast_next()."""
+    design = df.assign(_fwd=features.forward_target(df, target, horizon))
+    return signal_model.train(design, feature_cols, "_fwd", persist=False)
+
+
 def run(
     df: pd.DataFrame,
     feature_cols: list[str],
     target: str,
+    horizon: int = 0,
 ) -> pd.DataFrame:
-    """Train on the chosen features/target and add a `predicted_{target}` column.
+    """Train on the chosen features/target and add a `predicted_*` column.
 
     The model is handed straight to predict, so we skip persisting it — the UI
-    calls this on every rerun and doesn't reload from disk.
+    calls this on every rerun and doesn't reload from disk. `horizon=0` is the
+    contemporaneous (same-day) fit; `horizon>0` forecasts `horizon` trading days
+    ahead from today's features and aligns each prediction to the date it is FOR
+    (so the chart overlays past forecasts on the realised price).
     """
-    model = signal_model.train(df, feature_cols, target, persist=False)
-    df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
-    if target.endswith("_ret"):  # rebuild a price line from the predicted change
-        close = features.display_column(target)
-        df[f"predicted_{close}"] = features.reconstruct_close(
-            df[close], df[f"predicted_{target}"]
-        )
+    display_col = features.display_column(target)
+    if horizon == 0:
+        model = signal_model.train(df, feature_cols, target, persist=False)
+        df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
+        if target.endswith("_ret"):  # rebuild a price line from the predicted change
+            df[f"predicted_{display_col}"] = features.reconstruct_close(
+                df[display_col], df[f"predicted_{target}"]
+            )
+        return df
+
+    model = _forward_model(df, feature_cols, target, horizon)
+    pred_fwd = signal_model.predict(df, model, feature_cols)  # forward return at t
+    if target.endswith("_ret"):
+        df[f"predicted_{target}"] = pred_fwd  # predicted return, for the honest scatter
+        forecast = df[display_col] * (1 + pred_fwd)  # price predicted FOR t+horizon
+    else:
+        forecast = pred_fwd
+    df[f"predicted_{display_col}"] = forecast.shift(horizon)  # align to realised date
     return df
+
+
+def forecast_next(
+    df: pd.DataFrame, feature_cols: list[str], target: str, horizon: int = 1
+) -> dict[str, float | str]:
+    """Forecast `horizon` trading days past the last row: train the forward-target
+    model (today's features -> return over the next `horizon` days) on all cleaned
+    history, then feed the last row's ACTUAL features. For a `_ret` target the
+    reconstructed future close is included too.
+    """
+    clean = df.dropna(subset=[*feature_cols, target]).reset_index(drop=True)
+    model = _forward_model(clean, feature_cols, target, horizon)
+    latest = clean[feature_cols].iloc[[-1]]  # last actual features -> predict h ahead
+    pred = float(model.predict(latest)[0])
+    out: dict[str, float | str] = {
+        "from_date": str(clean["date"].iloc[-1]),
+        "horizon": horizon,
+        target: pred,
+    }
+    if target.endswith("_ret"):
+        close = features.display_column(target)
+        out[close] = float(clean[close].iloc[-1]) * (1 + pred)
+    return out
+
+
+def backtest_date(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+    target_date: object,  # datetime.date
+    horizon: int,
+) -> dict[str, float | str | int]:
+    """Point-in-time forecast of an ALREADY-PAST `target_date`: train ONLY on rows
+    before it, predict it from the features known `horizon` trading days earlier,
+    and return predicted vs actual so you can see directly whether it landed.
+    `horizon=0` tests the same-day fit out-of-sample. No lookahead — appending
+    later rows to `df` can't change the result. Raises if the date isn't a usable
+    trading row for this pick, or there's too little history before it.
+    """
+    clean = evaluation.drop_market_closed(df)
+    clean = clean.dropna(subset=[*feature_cols, target]).reset_index(drop=True)
+    match = clean.index[clean["date"] == target_date]
+    if len(match) == 0:
+        raise ValueError(f"{target_date} är ingen användbar handelsdag för valet")
+    i = int(match[0])
+    if i - horizon <= 0:
+        raise ValueError("för lite historik före det datumet för att prognosticera det")
+    display_col = features.display_column(target)
+    past = clean.iloc[:i]  # strictly before the target date -> no leakage
+    if horizon == 0:
+        model = signal_model.train(past, feature_cols, target, persist=False)
+        anchor, base = i, i - 1  # same-day features; reconstruct off yesterday's close
+    else:
+        model = _forward_model(past, feature_cols, target, horizon)
+        anchor = base = i - horizon  # features h days back; reconstruct off that close
+    pred = float(model.predict(clean[feature_cols].iloc[[anchor]])[0])
+    predicted = (
+        float(clean[display_col].iloc[base]) * (1 + pred)
+        if target.endswith("_ret")
+        else pred
+    )
+    actual = float(clean[display_col].iloc[i])
+    # naive baseline = "no change": carry the anchor's value forward unchanged, the
+    # honest reference the model has to beat (see evaluation.naive_baseline).
+    baseline = float(clean[display_col].iloc[base])
+    return {
+        "date": str(clean["date"].iloc[i]),
+        "column": display_col,
+        "predicted": predicted,
+        "actual": actual,
+        "error": predicted - actual,
+        "baseline": baseline,
+        "baseline_error": baseline - actual,
+        "trained_rows": len(past),
+        "trained_until": str(clean["date"].iloc[i - 1]),
+    }
 
 
 @dataclass
@@ -127,6 +228,7 @@ def evaluate(
     feature_cols: list[str],
     target: str,
     test_frac: float = 0.2,
+    horizon: int = 0,
 ) -> EvaluationResult:
     """Chronologically split `df`, train on the train split only, and compare
     the model's held-out test predictions against a naive baseline.
@@ -136,11 +238,20 @@ def evaluate(
     across closed days while `tone` keeps changing, which would otherwise
     teach the model an artificial repeated relationship. This is separate
     from run(), which trains on every row for the live chart.
+
+    `horizon>0` overwrites the target column with its forward label (the return
+    over the next `horizon` days) and evaluates that forecast against the SAME
+    baseline — so the metrics answer "does today's signal predict the next
+    day/week/month better than the naive forecast?". Keeping the original column
+    name means baseline_kind still picks `mean` for a `_ret` target.
     """
     clean = evaluation.drop_market_closed(df)
     # Drop rows this pick can't use (NaN tone/target before its coverage): a
     # returns-only model keeps the full price history, a tone pick trims to ~2017.
     clean = clean.dropna(subset=[*feature_cols, target]).reset_index(drop=True)
+    if horizon:  # forecast: predict the target's value/return `horizon` days ahead
+        clean[target] = features.forward_target(clean, target, horizon)
+        clean = clean.dropna(subset=[target]).reset_index(drop=True)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
     model = signal_model.train(train_df, feature_cols, target, persist=False)

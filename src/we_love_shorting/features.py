@@ -50,6 +50,19 @@ def reconstruct_close(close: pd.Series, predicted_ret: pd.Series) -> pd.Series:
     return close.shift(1) * (1 + predicted_ret)
 
 
+def forward_target(df: pd.DataFrame, target: str, horizon: int) -> pd.Series:
+    """The h-step-ahead label for a horizon forecast: predict from today's
+    features what happens `horizon` trading days out. For a `_ret` target it's the
+    stream's cumulative return over the next `horizon` days
+    (close[t+h]/close[t] - 1); otherwise the target's own value h steps ahead. The
+    last `horizon` rows are NaN (no future yet) and drop out at fit time. Call on
+    date-sorted rows so `t+h` is h trading days ahead."""
+    if target.endswith("_ret"):
+        close = df[display_column(target)]
+        return close.shift(-horizon) / close - 1.0
+    return df[target].shift(-horizon)
+
+
 def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Join every price stream + news tone by date into one wide table.
 

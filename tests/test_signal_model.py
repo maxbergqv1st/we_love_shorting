@@ -1,6 +1,32 @@
 import pandas as pd
+import pytest
 
 from we_love_shorting import controller, signal_model
+
+
+def test_backtest_date_ignores_future_rows():
+    # A point-in-time backtest must use ONLY data before the tested date: adding
+    # later rows to the frame cannot change the prediction (no lookahead).
+    dates = pd.date_range("2024-01-01", periods=30).date
+    close = pd.Series([100.0 + k for k in range(30)])
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "tone": 0.0,
+            "sp500_close": close,
+            "sp500_ret": close.pct_change().fillna(0.0),
+            "gold_close": close * 2,
+            "gold_ret": (close * 2).pct_change().fillna(0.0),
+            "market_closed": False,
+        }
+    )
+    d = dates[20]
+    full = controller.backtest_date(df, ["gold_ret"], "sp500_ret", d, horizon=1)
+    trunc = controller.backtest_date(df.iloc[:22], ["gold_ret"], "sp500_ret", d, 1)
+    assert full["predicted"] == pytest.approx(trunc["predicted"])  # future ignored
+    assert full["actual"] == pytest.approx(trunc["actual"])
+    assert full["baseline"] == pytest.approx(trunc["baseline"])  # baseline too
+    assert full["trained_until"] < full["date"]  # trained strictly on the past
 
 
 def test_dynamic_features_and_target_roundtrip():

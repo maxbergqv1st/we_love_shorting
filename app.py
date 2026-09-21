@@ -52,6 +52,10 @@ MODELS = ["Linear Regression", "Ridge Regression 🔒", "Random Forest 🔒"]
 # Chart timespan filter: trading days to show, counting back from the latest row.
 TIMESPANS = {"Vecka": 5, "Månad": 21, "År": 252, "Allt": None}
 
+# Forecast horizon: trading days ahead the model predicts. 0 = contemporaneous
+# ("förklara idag"); >0 = predict the return that far out from today's features.
+HORIZONS = {"Samtidig": 0, "Dag": 1, "Vecka": 5, "Månad": 21}
+
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
 
@@ -146,6 +150,20 @@ if "df" in st.session_state:
             key="feature_cols",
             format_func=lambda c: LABELS.get(c, c),
         )
+        st.subheader("Prognoshorisont")
+        horizon_label = (
+            st.segmented_control(
+                "Hur långt fram?",
+                list(HORIZONS),
+                default="Samtidig",
+                help="Samtidig = förklara dagens värde från dagens features. "
+                "Dag/Vecka/Månad = förutsäg avkastningen så många handelsdagar "
+                "fram från dagens features. Obs: prognoslägena slår i praktiken "
+                "inte den naiva baselinen — metod, inte bevisad edge.",
+            )
+            or "Samtidig"
+        )
+        horizon = HORIZONS[horizon_label]
 
     if feature_cols:
         name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
@@ -153,7 +171,8 @@ if "df" in st.session_state:
         st.info(
             f"🧠 Tränar **Linear Regression** → förutsäger **{name}** från {feature_names}"
         )
-        out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
+        # cheap: no re-fetch. horizon=0 is same-day; >0 forecasts that far ahead.
+        out = controller.run(df.copy(), feature_cols, target, horizon=horizon)
         # The model predicts a _ret; show the reconstructed price line instead of the
         # raw % so the live panel reads in kronor/dollar (controller.run adds it).
         display_col = features.display_column(target)
@@ -164,6 +183,17 @@ if "df" in st.session_state:
         col1.metric(f"Senaste faktiska: {disp_name}", f"{latest[display_col]:.2f}")
         col2.metric(f"Senaste prediktion: {disp_name}", f"{latest[display_pred]:.2f}")
         col3.metric("Differens", f"{latest[display_pred] - latest[display_col]:.2f}")
+        if horizon:
+            fc = controller.forecast_next(df, feature_cols, target, horizon)
+            st.metric(
+                f"🔮 Prognos om {horizon_label.lower()}: {disp_name}",
+                f"{fc[display_col]:.2f}",
+            )
+            change = f" ({fc[target] * 100:+.2f}%)" if target.endswith("_ret") else ""
+            st.caption(
+                f"Prognos {horizon} handelsdagar fram från {fc['from_date']}{change}. "
+                "⚠️ Slår i praktiken inte den naiva baselinen — metod, inte edge."
+            )
         # "Faktisk" < "Prediktion" for every target, so the actual/prediction pair
         # keeps a stable order whether Streamlit colours by column or by (sorted)
         # series name — the explicit list then pins actual=blue, prediction=orange.
@@ -179,11 +209,34 @@ if "df" in st.session_state:
             columns={display_col: actual, display_pred: pred}
         )
         chart_slot.line_chart(chart, color=["#4c78a8", "#f58518"])
-        if target.endswith("_ret"):
+        if horizon:
+            st.caption(
+                f"📈 Prediktionslinjen = modellens prognos {horizon} handelsdagar "
+                "tidigare, inlagd på det datum den gällde (så du ser hur tidigare "
+                "prognoser landade mot verkligt pris)."
+            )
+        elif target.endswith("_ret"):
             st.caption(
                 "📈 Priset är rekonstruerat från förutsagd dagsförändring "
                 "(gårdagens faktiska close × (1 + prediktion))."
             )
+        if target.endswith("_ret"):
+            # Honest fit: the price line above hugs reality because it's rebuilt on
+            # yesterday's ACTUAL close. On the return scale the real (weak) skill shows.
+            actual_ret = (
+                out[target]
+                if horizon == 0
+                else features.forward_target(out, target, horizon)
+            )
+            scatter = pd.DataFrame(
+                {"Faktisk": actual_ret, "Förutsagd": out[f"predicted_{target}"]}
+            )[~out["market_closed"]].dropna()
+            st.caption(
+                "🎯 Förutsagd vs faktisk return: en tät diagonal vore perfekt träff, "
+                "ett moln kring noll = svag. Detta är den ärliga bilden — pris-linjen "
+                "ovan följer priset bara för att den byggs på gårdagens faktiska close."
+            )
+            st.scatter_chart(scatter, x="Faktisk", y="Förutsagd")
         styled = out.style.apply(
             lambda row: (
                 ["background-color: #5a1f1f" if row.get("market_closed") else ""]
@@ -200,14 +253,65 @@ if "df" in st.session_state:
             "🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används."
         )
 
+        st.subheader("Testa en tidigare dag (out-of-sample)")
+        st.caption(
+            "Välj ett datum som redan hänt. Modellen tränas ENBART på data före "
+            "det datumet och prognosen jämförs direkt mot facit — noll lookahead."
+        )
+        test_date = st.date_input(
+            "Datum att testa",
+            value=df["date"].max(),
+            min_value=df["date"].min(),
+            max_value=df["date"].max(),
+        )
+        if st.button("Testa datumet"):
+            try:
+                bt = controller.backtest_date(
+                    df, feature_cols, target, test_date, horizon
+                )
+                model_ape = abs(bt["error"]) / bt["actual"] * 100
+                base_ape = abs(bt["baseline_error"]) / bt["actual"] * 100
+                b1, b2, b3 = st.columns(3)
+                b1.metric(f"Faktiskt: {disp_name}", f"{bt['actual']:.2f}")
+                b2.metric(
+                    f"Modell: {disp_name}",
+                    f"{bt['predicted']:.2f}",
+                    f"{bt['error'] / bt['actual'] * 100:+.2f}% fel",
+                    delta_color="off",
+                )
+                b3.metric(
+                    "Baseline (ingen förändring)",
+                    f"{bt['baseline']:.2f}",
+                    f"{bt['baseline_error'] / bt['actual'] * 100:+.2f}% fel",
+                    delta_color="off",
+                )
+                verdict = (
+                    "✅ modellen slog baselinen"
+                    if model_ape < base_ape
+                    else "⚠️ baselinen var lika bra/bättre — felet är marknadens brus"
+                )
+                mode = (
+                    f"prognos {horizon} handelsdagar fram"
+                    if horizon
+                    else "samma-dags-passning, out-of-sample"
+                )
+                st.caption(
+                    f"|Fel| modell {model_ape:.2f}% vs baseline {base_ape:.2f}% "
+                    f"— {verdict}. Tränad på {bt['trained_rows']} rader t.o.m. "
+                    f"{bt['trained_until']} ({mode})."
+                )
+            except Exception as e:  # noqa: BLE001 - bad date / too little history
+                st.warning(f"Kunde inte testa: {e}")
+
         st.subheader("Evaluering (train/test)")
         if st.button("Kör evaluering"):
             try:
                 st.session_state["eval_result"] = controller.evaluate(
-                    df, feature_cols, target
+                    df, feature_cols, target, horizon=horizon
                 )
                 st.session_state["eval_feature_cols"] = feature_cols
                 st.session_state["eval_target"] = target
+                st.session_state["eval_horizon"] = horizon
             except Exception as e:  # noqa: BLE001 - too little data after filtering, etc.
                 st.session_state.pop("eval_result", None)
                 st.warning(f"Kunde inte evaluera: {e}")
@@ -219,7 +323,11 @@ if "df" in st.session_state:
 
             # compare as sets: reselecting the same features in a different order
             # doesn't change the model, so it shouldn't flag the eval as stale.
-            if used_target != target or set(used_feature_cols) != set(feature_cols):
+            if (
+                used_target != target
+                or set(used_feature_cols) != set(feature_cols)
+                or st.session_state.get("eval_horizon") != horizon
+            ):
                 st.info(
                     "Valen ovan har ändrats sedan senaste evalueringen — "
                     "resultaten nedan gäller fortfarande föregående val. "
