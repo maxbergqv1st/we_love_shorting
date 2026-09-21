@@ -23,3 +23,4 @@ data/
 *.parquet
 *.joblib
 *.pkl
+.env
