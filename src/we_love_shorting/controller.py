@@ -101,6 +101,27 @@ def run(
     return df
 
 
+def predict_live(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+    live_values: dict[str, float],
+) -> float:
+    """Train on stored history, then predict one point using live-fetched
+    feature values in place of the corresponding stored ones.
+
+    A feature missing from `live_values` (no live source, e.g. `tone`, or a
+    ticker whose live fetch failed) falls back to the most recent stored
+    value for that column — the same carry-forward idea as a market-closed
+    day in features.build_features.
+    """
+    model = signal_model.train(df, feature_cols, target, persist=False)
+    latest = df.iloc[-1]
+    row = {c: live_values.get(c, latest[c]) for c in feature_cols}
+    live_df = pd.DataFrame([row])
+    return float(signal_model.predict(live_df, model, feature_cols).iloc[0])
+
+
 @dataclass
 class EvaluationResult:
     """Chronological train/test evaluation output: the test set carries the
