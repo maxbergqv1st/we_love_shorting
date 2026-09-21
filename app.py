@@ -64,7 +64,8 @@ get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
 
 def _stems_for(cols: list[str]) -> list[str]:
     """Ticker stems whose `_close` or `_ret` column is among `cols`."""
-    return [s for s in features.TICKERS if f"{s}_close" in cols or f"{s}_ret" in cols]
+    wanted = {features.stream_of(c) for c in cols}
+    return [s for s in features.TICKERS if s in wanted]
 
 
 @st.cache_data(ttl=60)
