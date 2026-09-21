@@ -172,6 +172,107 @@ def evaluate(
     )
 
 
+@dataclass
+class DirectionResult:
+    """Direction-classification evaluation: test_df carries the realised and
+    predicted direction classes (1/0/-1), `metrics` holds the model's and the
+    majority baseline's accuracy, and `threshold` is the dead-zone half-width
+    that split flat from up/down.
+    """
+
+    train_df: pd.DataFrame
+    test_df: pd.DataFrame
+    metrics: dict[str, dict[str, float]]
+    threshold: float
+
+
+def evaluate_direction(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+    test_frac: float = 0.2,
+) -> DirectionResult:
+    """Like evaluate(), but classifies the *direction* of `target` (up / flat /
+    down) instead of regressing its value — the tractable question for a
+    near-white-noise return series (see signal_model.train_direction). Model
+    accuracy is compared against always guessing train's majority direction.
+
+    The flat-class dead-zone is fitted on the train returns only and reused to
+    label the test actuals, so the threshold never sees held-out data.
+    """
+    clean = evaluation.drop_market_closed(df)
+    train_df, test_df = evaluation.chronological_split(clean, test_frac)
+
+    threshold = evaluation.direction_threshold(train_df[target])
+    y_train = evaluation.direction_labels(train_df[target], threshold)
+    y_test = evaluation.direction_labels(test_df[target], threshold)
+
+    model = signal_model.train_direction(train_df[feature_cols], y_train)
+    predicted = signal_model.predict_direction(test_df[feature_cols], model)
+    baseline = evaluation.majority_baseline(y_train, y_test.index)
+
+    test_df["actual_dir"] = y_test.to_numpy()
+    test_df["predicted_dir"] = predicted.to_numpy()
+
+    metrics = {
+        "model": evaluation.direction_metrics(y_test, predicted),
+        "baseline": evaluation.direction_metrics(y_test, baseline),
+    }
+    return DirectionResult(train_df, test_df, metrics, threshold)
+
+
+def run_direction(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+) -> pd.DataFrame:
+    """In-sample direction fit for the live chart: classify every row's
+    up/flat/down and add `actual_dir`/`predicted_dir`, so a return target can
+    show a followable direction view instead of a flat regression line. Trains
+    on all rows (no split) like run(), so it's a fit-quality view, not held-out.
+    """
+    threshold = evaluation.direction_threshold(df[target])
+    y = evaluation.direction_labels(df[target], threshold)
+    model = signal_model.train_direction(df[feature_cols], y)
+    df["actual_dir"] = y.to_numpy()
+    df["predicted_dir"] = signal_model.predict_direction(
+        df[feature_cols], model
+    ).to_numpy()
+    return df
+
+
+@dataclass
+class AssetGroupResult:
+    """Asset-similarity grouping: which streams move together. `corr` is the
+    return-correlation matrix reordered so grouped assets are adjacent (ready to
+    render as a heatmap), and `groups` maps each `<stem>_ret` column to its
+    group id, in the same order.
+    """
+
+    corr: pd.DataFrame
+    groups: pd.Series
+
+
+def group_assets(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    n_groups: int = 3,
+) -> AssetGroupResult:
+    """Group the selected streams by how their daily returns co-move. Uses each
+    selected stream's `_ret` column (returns are stationary — the honest basis
+    for correlation, unlike trending price levels). Needs ≥2 streams.
+    """
+    stems = dict.fromkeys(features.stream_of(c) for c in feature_cols)  # order-stable
+    ret_cols = [f"{s}_ret" for s in stems if f"{s}_ret" in df.columns]
+    if len(ret_cols) < 2:
+        raise ValueError("Välj minst två streams med avkastning (_ret) att gruppera.")
+
+    returns = df[ret_cols]
+    groups = signal_model.cluster_assets(returns, n_groups)
+    order = groups.sort_values().index
+    return AssetGroupResult(returns.corr().loc[order, order], groups.loc[order])
+
+
 if __name__ == "__main__":  # one-time backfill: python -m we_love_shorting.controller
     import sys
 

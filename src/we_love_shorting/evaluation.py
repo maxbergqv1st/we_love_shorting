@@ -6,7 +6,11 @@ import logging
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, root_mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    mean_absolute_error,
+    root_mean_squared_error,
+)
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +92,37 @@ def regression_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]
         "rmse": float(root_mean_squared_error(y_true, y_pred)),
         "mae": float(mean_absolute_error(y_true, y_pred)),
     }
+
+
+def direction_threshold(train_returns: pd.Series, flat_frac: float = 0.25) -> float:
+    """Dead-zone half-width for the 'flat' class: a return within
+    ±(flat_frac × train std) counts as unchanged. Data-driven so it adapts to
+    each stream's volatility instead of a hard-coded percentage.
+    """
+    # ponytail: flat_frac=0.25 is the one calibration knob; widen for a bigger
+    # 'unchanged' bucket, 0.0 collapses to a pure up/down split.
+    return float(flat_frac * train_returns.std())
+
+
+def direction_labels(returns: pd.Series, threshold: float) -> pd.Series:
+    """Bucket returns into 1 (up) / 0 (flat) / -1 (down) using the dead-zone."""
+    labels = pd.Series(0, index=returns.index, name="direction")
+    labels[returns > threshold] = 1
+    labels[returns < -threshold] = -1
+    return labels
+
+
+def majority_baseline(train_labels: pd.Series, test_index: pd.Index) -> pd.Series:
+    """Predict train's most frequent class for every test row — the naive
+    benchmark a classifier must beat. Works for any number of classes (2 or 3).
+    """
+    majority = train_labels.mode().iloc[0]
+    return pd.Series(majority, index=test_index, name="baseline")
+
+
+def direction_metrics(y_true: pd.Series, y_pred: pd.Series) -> dict[str, float]:
+    """Accuracy of a direction prediction against the realised direction."""
+    return {"accuracy": float(accuracy_score(y_true, y_pred))}
 
 
 def residuals(y_true: pd.Series, y_pred: pd.Series) -> pd.Series:
