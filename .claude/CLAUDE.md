@@ -23,6 +23,14 @@ Complete AI/ML project end-to-end, three required parts:
 - Pin dependencies. `logging`, never `print`, in library code.
 - `.streamlit/secrets.toml` and real data files stay git-ignored.
 
+## Techniques & tools in use (established patterns — reuse before adding)
+- **Streamlit API (current, not deprecated):** `width="stretch"` on `st.dataframe`, never `use_container_width=True`. `st.segmented_control` (with `or <default>` fallback for the deselect case) over `st.radio` for span pickers. Live panel is an `@st.fragment(run_every="1m")`.
+- **Session-state persistence:** persist widget picks with `key=` + `st.session_state.setdefault(...)`, then prune invalid entries each rerun — don't pass `default=` for state that must survive reruns.
+- **Derive labels/config from one source:** `LABELS` is built by looping `features.TICKERS`, not hand-maintained; a new ticker auto-gets labels. Group a stream's columns via `features.stream_of(col)` (`sp500_close`/`sp500_ret` → `sp500`).
+- **Baseline:** `naive_baseline` uses `test_target.shift(1)`, seeding row 0 from the last train value — no manual concat.
+- **AI Q&A:** `we_love_shorting.chatbot` (OpenRouter free model); key from `st.secrets["OPENROUTER_API_KEY"]`, absent → graceful in-UI error.
+- **mypy:** `ignore_missing_imports = true` in `pyproject.toml` (pandas/sklearn/joblib/yfinance ship no stubs). Run `mypy src app.py` before done.
+
 ## Domain guidance (skills auto-load when relevant)
 - General Python style/structure → `python-best-practices` skill.
 - ML: models, pipelines, preprocessing, evaluation → `sklearn` skill.
