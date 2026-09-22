@@ -180,28 +180,27 @@ def _live_feature_values(
 
 @st.fragment(run_every="1m")
 def live_predictor_panel(
-    df: pd.DataFrame,
+    df_live: pd.DataFrame,
+    df_train: pd.DataFrame,
     feature_cols: list[str],
     target: str,
     params: dict[str, Any],
     horizon: int = 0,
 ) -> None:
     """Live estimate, self-refreshing every minute (a fragment, so only this
-    block reruns). With a shifted frame (horizon > 0) the trained model maps
-    today's live features to the value `horizon` days ahead — a real forecast.
-    The refresh + timestamp make it visibly live."""
-    live_values, timestamps = _live_feature_values(df, feature_cols)
+    block reruns). Trains on `df_train` (the horizon-shifted frame, so the
+    model maps today's features `horizon` days ahead) but derives live feature
+    values from `df_live` (the raw frame) — the shifted frame's last rows are
+    dropped, so its tail is stale for computing today's move against the
+    latest stored close. The refresh + timestamp make it visibly live."""
+    live_values, timestamps = _live_feature_values(df_live, feature_cols)
     now = dt.datetime.now().astimezone()
     if not live_values:
         st.caption(":red-badge[● LIVE] Ingen vald feature går att hämta live just nu.")
         return
-    model_kw = {
-        k: params[k]
-        for k in ("alpha", "model_kind", "n_estimators", "max_depth")
-        if k in params
-    }
+    model_kw = {k: params[k] for k in analysis.MODEL_KEYS if k in params}
     prediction = controller.predict_live(
-        df, feature_cols, target, live_values, **model_kw
+        df_train, feature_cols, target, live_values, **model_kw
     )
     newest_local = max(timestamps.values()).to_pydatetime().astimezone()
     stale = newest_local.date() != now.date()
@@ -432,17 +431,11 @@ with st.sidebar:
         or "Regression"
     )
     model_kind = "linear"
-    if mode_key == "Regression":
-        model_kind = (
-            "forest"
-            if (
-                st.segmented_control(
-                    "Modell", ["Linjär", "Random Forest"], default="Linjär"
-                )
-                == "Random Forest"
-            )
-            else "linear"
-        )
+    if mode_key == "Regression" and (
+        st.segmented_control("Modell", ["Linjär", "Random Forest"], default="Linjär")
+        == "Random Forest"
+    ):
+        model_kind = "forest"
 
     # Hyperparametrar: toggla på valfri delmängd (flera samtidigt), styr var och
     # en. Av = standardvärde. Bara aktiva hamnar i `params`.
@@ -485,7 +478,7 @@ df_h = controller.shift_target(df, target, horizon)
 
 # ── Live estimate (hero) ─────────────────────────────────────────────────────
 with st.container(border=True):
-    live_predictor_panel(df_h, feature_cols, target, params, horizon)
+    live_predictor_panel(df, df_h, feature_cols, target, params, horizon)
 
 # ── Main view (large focus card) ─────────────────────────────────────────────
 with st.container(border=True):

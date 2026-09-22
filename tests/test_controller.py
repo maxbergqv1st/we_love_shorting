@@ -19,16 +19,20 @@ def _df(target_col: str, y: list[float]) -> pd.DataFrame:
     )
 
 
-def test_shift_target_makes_row_t_carry_t_plus_horizon():
+def test_shift_target_shifts_over_trading_days_only():
+    # closed rows (idx 3 and 7) hold carried-forward values; a calendar shift
+    # would hand idx 2 its own value as "tomorrow". The shift must therefore
+    # run on the open-market rows only.
     df = _df("y", [10, 12, 11, 13, 14, 15, 16, 17, 18, 19])
 
     out = controller.shift_target(df, "y", horizon=1)
 
-    # row t's target is now t+1's actual; the last row (unknown future) is gone
-    # and the features (x) stay untouched at their own day.
-    assert len(out) == 9
-    assert out["y"].tolist() == [12, 11, 13, 14, 15, 16, 17, 18, 19]
-    assert out["x"].tolist() == list(range(9))
+    # 10 rows - 2 closed = 8 open rows, minus the last (unknown future) = 7.
+    assert len(out) == 7
+    # open-row targets are [10,12,11,14,15,16,18,19]; each row gets the NEXT one
+    assert out["y"].tolist() == [12, 11, 14, 15, 16, 18, 19]
+    # features stay on their own day (open rows' x, last one dropped)
+    assert out["x"].tolist() == [0, 1, 2, 4, 5, 6, 8]
     # horizon 0 = nowcast, untouched frame
     assert controller.shift_target(df, "y", horizon=0) is df
 

@@ -24,6 +24,11 @@ from . import controller, features
 
 # Numeric direction classes -> human labels, shared by the modes that show them.
 DIRECTION_LABELS = {1: "Upp", 0: "Oförändrad", -1: "Ner"}
+
+# The regressor's knobs (signal_model.train's model arguments). Single source
+# for everyone forwarding them out of a params dict (RegressionMode, the live
+# panel) — add a knob here and in signal_model.train, nowhere else.
+MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
 _ACTUAL, _PRED = "Faktisk", "Prediktion"
 _SERIES_COLORS = ["#4c78a8", "#f58518"]  # actual = blue, prediction = orange
 
@@ -96,11 +101,9 @@ class RegressionMode(AnalysisMode):
     label = "Regression"
     needs_target = True
 
-    _MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
-
     def live_panels(self, df, feature_cols, target, label, params):
         out = controller.run(
-            df.copy(), feature_cols, target, **_kw(params, *self._MODEL_KEYS)
+            df.copy(), feature_cols, target, **_kw(params, *MODEL_KEYS)
         ).set_index("date")
         pred = f"predicted_{target}"
         chart = out[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
@@ -124,7 +127,7 @@ class RegressionMode(AnalysisMode):
 
     def evaluate(self, df, feature_cols, target, params):
         return controller.evaluate(
-            df, feature_cols, target, **_kw(params, "test_frac", *self._MODEL_KEYS)
+            df, feature_cols, target, **_kw(params, "test_frac", *MODEL_KEYS)
         )
 
     def evaluate_panels(self, result, label):

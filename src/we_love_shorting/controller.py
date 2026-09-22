@@ -89,10 +89,17 @@ def get_data() -> pd.DataFrame:
 
 def shift_target(df: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
     """Turn the nowcast frame into a forecast frame: row t keeps its features
-    but its `target` value becomes the actual from t+`horizon`, so a model
-    trained on it predicts `horizon` days ahead. The last `horizon` rows (whose
-    future value doesn't exist yet) are dropped. horizon=0 is the nowcast —
-    returned as-is. Shift BEFORE any train/test split so nothing leaks.
+    but its `target` value becomes the actual from t+`horizon` TRADING days, so
+    a model trained on it predicts `horizon` days ahead. The last `horizon`
+    rows (whose future value doesn't exist yet) are dropped. horizon=0 is the
+    nowcast — returned as-is. Shift BEFORE any train/test split so nothing
+    leaks.
+
+    The shift runs on the market-open rows only: the raw frame has one row per
+    tone date (daily, incl. weekends) where closed-day prices are carried
+    forward, so a calendar-day shift would hand every Friday row Saturday's
+    carried close — its own value — teaching the model a fake "tomorrow equals
+    today" on ~1 row in 5. Forecasting is therefore defined over trading days.
 
     Every downstream piece then works unchanged: the persistence baseline
     becomes "predict tomorrow with today's actual" (the correct naive
@@ -100,7 +107,10 @@ def shift_target(df: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
     """
     if horizon == 0:
         return df
-    out = df.copy()
+    out = df
+    if "market_closed" in out.columns:
+        out = out[~out["market_closed"]]
+    out = out.copy().reset_index(drop=True)
     out[target] = out[target].shift(-horizon)
     return out.dropna(subset=[target]).reset_index(drop=True)
 
