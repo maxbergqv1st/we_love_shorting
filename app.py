@@ -455,35 +455,9 @@ if extra:
 
 # ── Sidebar: settings (top) ──────────────────────────────────────────────────
 candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
-default_target = features.TARGET if features.TARGET in candidates else candidates[0]
 
 with st.sidebar:
     st.subheader("Inställningar", icon=":material/tune:")
-    target = st.selectbox(
-        "Mål — vad ska förutsägas?",
-        candidates,
-        index=candidates.index(default_target),
-        format_func=lambda c: LABELS.get(c, c),
-        key="target",
-    )
-    # Exclude the target's whole stream: choosing sp500_close (or _ret) drops
-    # both sp500_close and sp500_ret from the features. A per-target key means
-    # each target keeps its own selection and the options always match it, so
-    # there's no stale-option pruning to hand-manage.
-    target_stream = features.stream_of(target)
-    feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
-    # default to the raw columns only; the derived ma/vol features are opt-in
-    # so the picker doesn't open as a wall of 35 chips.
-    raw_default = [
-        c for c in feature_opts if c == "tone" or c.endswith(("_close", "_ret"))
-    ]
-    feature_cols = st.multiselect(
-        "Features",
-        feature_opts,
-        default=raw_default,
-        key=f"features::{target}",
-        format_func=lambda c: LABELS.get(c, c),
-    )
     horizon_key = (
         st.segmented_control("Horisont", list(HORIZONS), default="Idag (nowcast)")
         or "Idag (nowcast)"
@@ -527,12 +501,51 @@ with st.sidebar:
     if model_kind != "linear":
         params["model_kind"] = model_kind  # linear is the default downstream
 
+# ── Selection (above the chart): one target, feature STREAMS as toggles ─────
+# Toggling a stream includes all its columns (close/ret/ma/vol) as features —
+# the picker works in streams, not in 5 near-identical chips per asset.
+target_opts = [c for c in candidates if c == "tone" or c.endswith(("_close", "_ret"))]
+default_target = features.TARGET if features.TARGET in target_opts else target_opts[0]
+
+
+def stream_label(stem: str) -> str:
+    if stem == "tone":
+        return "News tone"
+    if stem in st.session_state["extra_streams"]:
+        return st.session_state["extra_streams"][stem]["name"]
+    return STREAM_NAMES.get(stem, stem)
+
+
+with st.container(border=True):
+    sel = st.columns([4, 8], vertical_alignment="center")
+    target = sel[0].selectbox(
+        "Mål — vad ska förutsägas?",
+        target_opts,
+        index=target_opts.index(default_target),
+        format_func=lambda c: LABELS.get(c, c),
+        key="target",
+    )
+    # every stream in the table except the target's own (a stream must not
+    # predict itself); per-target key keeps each target's toggles separate.
+    target_stream = features.stream_of(target)
+    all_streams = list(dict.fromkeys(features.stream_of(c) for c in candidates))
+    stream_opts = [s for s in all_streams if s != target_stream]
+    picked_streams = sel[1].pills(
+        "Features — streams (alla kolumner för en vald stream räknas med)",
+        stream_opts,
+        selection_mode="multi",
+        default=stream_opts,
+        key=f"streams::{target}",
+        format_func=stream_label,
+    )
+
+feature_cols = [c for c in candidates if features.stream_of(c) in picked_streams]
 if not feature_cols:
-    st.warning("Välj minst en feature i sidofältet.", icon=":material/warning:")
+    st.warning("Toggla på minst en stream ovan.", icon=":material/warning:")
     st.stop()
 
 name = LABELS.get(target, target)
-feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
+feature_names = ", ".join(stream_label(s) for s in picked_streams)
 mode = analysis.MODES[mode_key]
 # The forecast frame: row t's target becomes t+horizon's actual (no-op for
 # nowcast). Everything model-related below uses df_h; the compare/grouping
