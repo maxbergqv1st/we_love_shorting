@@ -15,23 +15,27 @@ TICKERS = {
     "copper": "HG=F",
     "oil": "CL=F",  # crude oil
 }
+# Per-stream columns: the raw level/return plus derived context features
+# (rolling mean = trend, rolling std of returns = volatility) — the standard
+# extra signal a forecaster wants beyond today's raw numbers.
+STREAM_SUFFIXES = ("close", "ret", "ma5", "ma21", "vol21")
 # Every measured value the model can use. tone (GDELT) is one column in the pool
 # beside the price columns — any of them can be the TARGET or a FEATURE.
 COLUMNS = [
     "tone",
-    *(f"{stem}_close" for stem in TICKERS),
-    *(f"{stem}_ret" for stem in TICKERS),
+    *(f"{stem}_{sfx}" for sfx in STREAM_SUFFIXES for stem in TICKERS),
 ]
 TARGET = "tone"  # default target (swappable in the UI)
 FEATURES = [c for c in COLUMNS if c != TARGET]  # default: predict from all the rest
 
 
 def stream_of(column: str) -> str:
-    """The stream a column belongs to: `sp500_close` and `sp500_ret` both map to
-    `sp500`; `tone` maps to itself. Lets the UI treat a stream's level and return
-    as one group, so picking either as the target excludes both from features
-    (a stream must not predict itself via its own level/return)."""
-    return column.removesuffix("_close").removesuffix("_ret")
+    """The stream a column belongs to: `sp500_close`, `sp500_ret`, `sp500_ma21`…
+    all map to `sp500`; `tone` maps to itself. Works for any suffix because the
+    stems in TICKERS never contain an underscore. Lets the UI treat a stream's
+    columns as one group, so picking any of them as the target excludes the
+    whole stream from features (a stream must not predict itself)."""
+    return column.split("_")[0]
 
 
 def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -60,8 +64,20 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
     frames = []
     for stem, frame in prices.items():
         frame = frame.copy()
-        # own trading calendar, pre-merge: see the `_ret` note above.
-        frame[f"{stem}_ret"] = frame[f"{stem}_close"].pct_change()
+        # own trading calendar, pre-merge: see the `_ret` note above. Rolling
+        # windows use min_periods so a short history yields partial-window
+        # stats instead of NaN-dropping its first month (std needs ≥2 obs, so
+        # the very first ret row is NaN and gets dropped like before).
+        close, ret = frame[f"{stem}_close"], frame[f"{stem}_close"].pct_change()
+        frame[f"{stem}_ret"] = ret
+        frame[f"{stem}_ma5"] = close.rolling(5, min_periods=1).mean()
+        frame[f"{stem}_ma21"] = close.rolling(21, min_periods=1).mean()
+        # warmup rows are backfilled from the first computable std (and a
+        # degenerate <3-row history gets 0.0) so the derived column never
+        # widens the global dropna beyond what `_ret` already drops.
+        frame[f"{stem}_vol21"] = (
+            ret.rolling(21, min_periods=2).std().bfill().fillna(0.0)
+        )
         frames.append(frame)
     ref_dates = pd.to_datetime(frames[0]["date"])  # reference market's trading days
     merged = frames[0]

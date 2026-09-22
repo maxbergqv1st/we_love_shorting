@@ -87,6 +87,24 @@ def get_data() -> pd.DataFrame:
     return features.build_features(db.load("tone"), prices)
 
 
+def shift_target(df: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
+    """Turn the nowcast frame into a forecast frame: row t keeps its features
+    but its `target` value becomes the actual from t+`horizon`, so a model
+    trained on it predicts `horizon` days ahead. The last `horizon` rows (whose
+    future value doesn't exist yet) are dropped. horizon=0 is the nowcast —
+    returned as-is. Shift BEFORE any train/test split so nothing leaks.
+
+    Every downstream piece then works unchanged: the persistence baseline
+    becomes "predict tomorrow with today's actual" (the correct naive
+    forecast), and direction classifies tomorrow's move.
+    """
+    if horizon == 0:
+        return df
+    out = df.copy()
+    out[target] = out[target].shift(-horizon)
+    return out.dropna(subset=[target]).reset_index(drop=True)
+
+
 def run(
     df: pd.DataFrame,
     feature_cols: list[str],

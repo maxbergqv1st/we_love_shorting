@@ -19,6 +19,20 @@ def _df(target_col: str, y: list[float]) -> pd.DataFrame:
     )
 
 
+def test_shift_target_makes_row_t_carry_t_plus_horizon():
+    df = _df("y", [10, 12, 11, 13, 14, 15, 16, 17, 18, 19])
+
+    out = controller.shift_target(df, "y", horizon=1)
+
+    # row t's target is now t+1's actual; the last row (unknown future) is gone
+    # and the features (x) stay untouched at their own day.
+    assert len(out) == 9
+    assert out["y"].tolist() == [12, 11, 13, 14, 15, 16, 17, 18, 19]
+    assert out["x"].tolist() == list(range(9))
+    # horizon 0 = nowcast, untouched frame
+    assert controller.shift_target(df, "y", horizon=0) is df
+
+
 def test_evaluate_drops_closed_rows_then_splits_chronologically():
     df = _df("y", [10, 12, 11, 13, 14, 15, 16, 17, 18, 19])
 

@@ -42,7 +42,8 @@ def test_regression_mode_panels_and_context():
 
     result = mode.evaluate(df, ["tone"], "spy_close", {})
     panels = mode.evaluate_panels(result, "S&P 500")
-    assert {"table", "scatter", "bar"} <= set(_panel_kinds(panels))
+    # trimmed on purpose: metrics table + one residual view (histogram)
+    assert _panel_kinds(panels) == ["table", "bar"]
     assert "Mätvärden" in mode.context(result) or "Testperiod" in mode.context(result)
 
 

@@ -34,11 +34,9 @@ class Panel:
     the remaining fields are the arguments that kind needs.
     """
 
-    kind: str  # "text" | "line" | "scatter" | "bar" | "table"
+    kind: str  # "text" | "line" | "bar" | "table"
     caption: str = ""
     data: pd.DataFrame | None = None
-    x: str | None = None  # scatter: x column
-    y: str | None = None  # scatter: y column
     colors: list[str] | None = None  # line: explicit per-series colours
     gradient: bool = False  # table: render as a −1..1 correlation heatmap
 
@@ -127,8 +125,10 @@ class RegressionMode(AnalysisMode):
         )
 
     def evaluate_panels(self, result, label):
+        # Kept deliberately tight: the metrics table (the honest model-vs-
+        # baseline verdict) and one residual view. The scatter and over-time
+        # residual lines were two more views of the same information.
         test_df = result.test_df
-        pred_col = next(c for c in test_df.columns if c.startswith("predicted_"))
         metrics = pd.DataFrame(result.metrics).rename(
             columns={"model": "Modell", "baseline": "Baseline"},
             index={"rmse": "RMSE", "mae": "MAE"},
@@ -138,15 +138,7 @@ class RegressionMode(AnalysisMode):
         hist = pd.DataFrame({"Antal": counts}, index=pd.Index(mids, name="Residual"))
         return [
             Panel("table", "Mätvärden (modell vs baseline)", metrics),
-            Panel(
-                "scatter",
-                "Residual vs. prediktion",
-                test_df,
-                x=pred_col,
-                y="residual",
-            ),
-            Panel("line", "Residual över tid", test_df.set_index("date")[["residual"]]),
-            Panel("bar", "Histogram över residualer", hist),
+            Panel("bar", "Histogram över residualer (0-centrerat = oskevt fel)", hist),
         ]
 
     def context(self, result):

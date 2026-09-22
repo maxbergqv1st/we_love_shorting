@@ -41,11 +41,22 @@ STREAM_NAMES = {
     "copper": "Copper",
     "oil": "Crude oil",
 }
+_SUFFIX_LABELS = {
+    "close": "{}",
+    "ret": "{} (daglig %)",
+    "ma5": "{} (5d snitt)",
+    "ma21": "{} (21d snitt)",
+    "vol21": "{} (21d volatilitet)",
+}
 LABELS = {"tone": "News tone"}
 for _stem in features.TICKERS:
     _name = STREAM_NAMES.get(_stem, _stem)
-    LABELS[f"{_stem}_close"] = _name
-    LABELS[f"{_stem}_ret"] = f"{_name} (daily % change)"
+    for _sfx, _fmt in _SUFFIX_LABELS.items():
+        LABELS[f"{_stem}_{_sfx}"] = _fmt.format(_name)
+
+# Forecast horizon: 0 = estimate today's value from today's features (nowcast),
+# 1 = train features(t) -> target(t+1), i.e. a real next-day forecast.
+HORIZONS = {"Idag (nowcast)": 0, "Imorgon (+1 dag)": 1}
 
 # Chart timespan filter: trading days to show, counting back from the latest row.
 TIMESPANS = {"Vecka": 5, "Månad": 21, "År": 252, "Allt": None}
@@ -167,10 +178,16 @@ def _live_feature_values(
 
 @st.fragment(run_every="1m")
 def live_predictor_panel(
-    df: pd.DataFrame, feature_cols: list[str], target: str, alpha: float = 0.0
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    target: str,
+    alpha: float = 0.0,
+    horizon: int = 0,
 ) -> None:
-    """Live 'today' estimate, self-refreshing every minute (a fragment, so only
-    this block reruns). The refresh + timestamp make it visibly live."""
+    """Live estimate, self-refreshing every minute (a fragment, so only this
+    block reruns). With a shifted frame (horizon > 0) the trained model maps
+    today's live features to the value `horizon` days ahead — a real forecast.
+    The refresh + timestamp make it visibly live."""
     live_values, timestamps = _live_feature_values(df, feature_cols)
     now = dt.datetime.now().astimezone()
     if not live_values:
@@ -179,8 +196,9 @@ def live_predictor_panel(
     prediction = controller.predict_live(df, feature_cols, target, live_values, alpha)
     newest_local = max(timestamps.values()).to_pydatetime().astimezone()
     stale = newest_local.date() != now.date()
+    when = "imorgon" if horizon else "idag"
     st.metric(
-        f":red-badge[● LIVE] Skattning för idag · {LABELS.get(target, target)}",
+        f":red-badge[● LIVE] Prognos {when} · {LABELS.get(target, target)}",
         f"{prediction:.4f}",
     )
     st.caption(
@@ -248,14 +266,12 @@ def render_panel(panel: analysis.Panel, days: int | None) -> None:
     data = panel.data
     if panel.kind == "text":
         return
-    # live time-series panels (line/scatter over date) trim to the window; the
-    # rows are chronological so tail() keeps the most recent `days`.
-    if days is not None and data is not None and panel.kind in ("line", "scatter"):
+    # live time-series lines trim to the window; the rows are chronological so
+    # tail() keeps the most recent `days`.
+    if days is not None and data is not None and panel.kind == "line":
         data = data.tail(days)
     if panel.kind == "line":
         line_chart(data, panel.colors)
-    elif panel.kind == "scatter":
-        st.scatter_chart(data, x=panel.x, y=panel.y)
     elif panel.kind == "bar":
         st.bar_chart(data)
     elif panel.kind == "table":
@@ -385,13 +401,23 @@ with st.sidebar:
     # there's no stale-option pruning to hand-manage.
     target_stream = features.stream_of(target)
     feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
+    # default to the raw columns only; the derived ma/vol features are opt-in
+    # so the picker doesn't open as a wall of 35 chips.
+    raw_default = [
+        c for c in feature_opts if c == "tone" or c.endswith(("_close", "_ret"))
+    ]
     feature_cols = st.multiselect(
         "Features",
         feature_opts,
-        default=feature_opts,
+        default=raw_default,
         key=f"features::{target}",
         format_func=lambda c: LABELS.get(c, c),
     )
+    horizon_key = (
+        st.segmented_control("Horisont", list(HORIZONS), default="Idag (nowcast)")
+        or "Idag (nowcast)"
+    )
+    horizon = HORIZONS[horizon_key]
     mode_key = (
         st.segmented_control("Läge", list(analysis.MODES), default="Regression")
         or "Regression"
@@ -429,15 +455,19 @@ if not feature_cols:
 name = LABELS.get(target, target)
 feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
 mode = analysis.MODES[mode_key]
+# The forecast frame: row t's target becomes t+horizon's actual (no-op for
+# nowcast). Everything model-related below uses df_h; the compare/grouping
+# cards keep the raw df — they describe the data, not the prediction task.
+df_h = controller.shift_target(df, target, horizon)
 
 # ── Live estimate (hero) ─────────────────────────────────────────────────────
 with st.container(border=True):
-    live_predictor_panel(df, feature_cols, target, params.get("alpha", 0.0))
+    live_predictor_panel(df_h, feature_cols, target, params.get("alpha", 0.0), horizon)
 
 # ── Main view (large focus card) ─────────────────────────────────────────────
 with st.container(border=True):
     head = st.columns([6, 6], vertical_alignment="center")
-    head[0].markdown(f"#### {mode.label} · {name}")
+    head[0].markdown(f"#### {mode.label} · {name} · {horizon_key}")
     with head[1].container(horizontal=True, horizontal_alignment="right"):
         timespan = (
             st.segmented_control(
@@ -447,7 +477,7 @@ with st.container(border=True):
         )
     days = TIMESPANS[timespan]
     try:
-        for panel in mode.live_panels(df, feature_cols, target, name, params):
+        for panel in mode.live_panels(df_h, feature_cols, target, name, params):
             render_panel(panel, days)
     except Exception as e:  # noqa: BLE001 - degenerate fit (e.g. all-flat), etc.
         st.warning(f"Kunde inte rendera vyn: {e}")
@@ -514,7 +544,11 @@ with card("Evaluering · held-out test"):
     try:
         with st.spinner("Evaluerar…"):
             result = cached_eval(
-                mode_key, df, tuple(feature_cols), target, tuple(sorted(params.items()))
+                mode_key,
+                df_h,
+                tuple(feature_cols),
+                target,
+                tuple(sorted(params.items())),
             )
         for panel in mode.evaluate_panels(result, name):
             render_panel(panel, None)
@@ -543,25 +577,12 @@ with card("Individuella features"):
     else:
         st.caption("Aktivera för att se varje feature för sig.")
 
-# ── Raw data (regression only, optional) ─────────────────────────────────────
-if mode_key == "Regression":
-    with st.expander("Rådata", icon=":material/table_chart:"):
-        out = controller.run(df.copy(), feature_cols, target, params.get("alpha", 0.0))
-        styled = out.style.apply(
-            lambda row: (
-                ["background-color: #4b2b2f" if row.get("market_closed") else ""]
-                * len(row)
-            ),
-            axis=1,
-        )  # market_closed drives the row colour; hidden via column_config
-        st.dataframe(styled, width="stretch", column_config={"market_closed": None})
-        st.caption("Röd rad = börsen stängd, föregående close bärs fram.")
-
 # ── Sidebar: AI assistant (lower half, always available) ─────────────────────
 with st.sidebar:
     st.divider()
     render_chat(
         f"Data {df['date'].min()}–{df['date'].max()} ({len(df)} rader). "
-        f"Läge: {mode.label}. Mål: {name}. Features: {feature_names}. "
+        f"Läge: {mode.label}. Horisont: {horizon_key}. Mål: {name}. "
+        f"Features: {feature_names}. "
         f"Evaluering (modell vs baseline): {chat_metrics}."
     )
