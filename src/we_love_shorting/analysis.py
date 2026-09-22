@@ -38,6 +38,7 @@ class Panel:
     caption: str = ""
     data: pd.DataFrame | None = None
     colors: list[str] | None = None  # line: explicit per-series colours
+    horizontal: bool = False  # bar: sideways bars (labelled categories)
     gradient: bool = False  # table: render as a −1..1 correlation heatmap
 
 
@@ -95,9 +96,11 @@ class RegressionMode(AnalysisMode):
     label = "Regression"
     needs_target = True
 
+    _MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
+
     def live_panels(self, df, feature_cols, target, label, params):
         out = controller.run(
-            df.copy(), feature_cols, target, **_kw(params, "alpha")
+            df.copy(), feature_cols, target, **_kw(params, *self._MODEL_KEYS)
         ).set_index("date")
         pred = f"predicted_{target}"
         chart = out[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
@@ -121,23 +124,33 @@ class RegressionMode(AnalysisMode):
 
     def evaluate(self, df, feature_cols, target, params):
         return controller.evaluate(
-            df, feature_cols, target, **_kw(params, "test_frac", "alpha")
+            df, feature_cols, target, **_kw(params, "test_frac", *self._MODEL_KEYS)
         )
 
     def evaluate_panels(self, result, label):
         # Kept deliberately tight: the metrics table (the honest model-vs-
-        # baseline verdict) and one residual view. The scatter and over-time
-        # residual lines were two more views of the same information.
+        # baseline verdict), the weight view (what the model leans on) and one
+        # residual view. The scatter and over-time residual lines were two
+        # more views of the same information.
         test_df = result.test_df
         metrics = pd.DataFrame(result.metrics).rename(
             columns={"model": "Modell", "baseline": "Baseline"},
             index={"rmse": "RMSE", "mae": "MAE"},
         )
+        w = result.weights.reindex(result.weights.abs().sort_values().index)
         counts, edges = np.histogram(test_df["residual"], bins=20)
         mids = (edges[:-1] + edges[1:]) / 2
         hist = pd.DataFrame({"Antal": counts}, index=pd.Index(mids, name="Residual"))
         return [
             Panel("table", "Mätvärden (modell vs baseline)", metrics),
+            Panel(
+                "bar",
+                "Vad modellen lutar sig på: koefficienter (linjär/Ridge — Ridges "
+                "är på skalade features och därmed jämförbara; rå OLS bär "
+                "featurens enhet) eller feature importances (Random Forest).",
+                w.rename("Vikt").to_frame(),
+                horizontal=True,
+            ),
             Panel("bar", "Histogram över residualer (0-centrerat = oskevt fel)", hist),
         ]
 

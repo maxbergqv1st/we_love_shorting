@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from we_love_shorting import controller, evaluation, signal_model
 
@@ -21,6 +22,26 @@ def test_dynamic_features_and_target_roundtrip():
 
     out = controller.run(df.copy(), features, target)
     assert f"predicted_{target}" in out.columns  # dynamic column name
+
+
+def test_forest_model_and_weights():
+    df = pd.DataFrame(
+        {
+            "tone": [1.0, -2.0, 0.5, 3.0, -1.0, 2.0, 0.0, 1.5],
+            "oil_close": [70.0, 72.0, 71.0, 73.0, 69.0, 74.0, 70.0, 72.0],
+            "spy_close": [100.0, 110.0, 105.0, 108.0, 102.0, 111.0, 101.0, 107.0],
+        }
+    )
+    feats, target = ["tone", "oil_close"], "spy_close"
+
+    forest = signal_model.train(df, feats, target, model_kind="forest")
+    assert len(signal_model.predict(df, forest, feats)) == len(df)
+    w = signal_model.weights(forest, feats)
+    assert list(w.index) == feats
+    assert w.sum() == pytest.approx(1.0)  # importances sum to 1
+
+    linear = signal_model.train(df, feats, target)
+    assert list(signal_model.weights(linear, feats).index) == feats  # coef path
 
 
 def test_direction_labels_dead_zone():

@@ -4,11 +4,14 @@ persisted, so there is no stale-model-on-disk state to reason about."""
 
 import pandas as pd
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .features import FEATURES, TARGET
+
+type Regressor = LinearRegression | RandomForestRegressor | Pipeline
 
 
 def train(
@@ -16,14 +19,27 @@ def train(
     features: list[str] = FEATURES,
     target: str = TARGET,
     alpha: float = 0.0,
-) -> LinearRegression | Pipeline:
-    """Fit the price→target regressor. `alpha` is the L2 penalty: 0 keeps plain
-    OLS (scale-invariant, no scaler needed); alpha > 0 switches to Ridge, which
-    penalises large coefficients (a smoother, less overfit fit) — Ridge is NOT
-    scale-invariant, so it needs a StandardScaler in front.
+    model_kind: str = "linear",
+    n_estimators: int = 100,
+    max_depth: int = 6,
+) -> Regressor:
+    """Fit the price→target regressor.
+
+    `model_kind="linear"`: `alpha` is the L2 penalty — 0 keeps plain OLS
+    (scale-invariant, no scaler needed); alpha > 0 switches to Ridge, which
+    penalises large coefficients (a smoother, less overfit fit) and is NOT
+    scale-invariant, so it gets a StandardScaler in front.
+    `model_kind="forest"`: a RandomForestRegressor (captures non-linear
+    interactions trees can express but a linear model can't); `alpha` is
+    ignored, `n_estimators`/`max_depth` bound size and overfitting.
+    `random_state` pins the forest so a rerun is reproducible.
     """
-    model: LinearRegression | Pipeline
-    if alpha > 0:
+    model: Regressor
+    if model_kind == "forest":
+        model = RandomForestRegressor(
+            n_estimators=n_estimators, max_depth=max_depth, random_state=0, n_jobs=-1
+        )
+    elif alpha > 0:
         model = make_pipeline(StandardScaler(), Ridge(alpha=alpha))
     else:
         model = LinearRegression()
@@ -33,10 +49,22 @@ def train(
 
 def predict(
     df: pd.DataFrame,
-    model: LinearRegression | Pipeline,
+    model: Regressor,
     features: list[str] = FEATURES,
 ) -> pd.Series:
     return pd.Series(model.predict(df[features]), index=df.index, name="predicted")
+
+
+def weights(model: Regressor, features: list[str]) -> pd.Series:
+    """What the fitted regressor leans on, per feature: coefficients for the
+    linear family (Ridge's are on scaled features, so they ARE comparable across
+    features; raw OLS coefficients carry each feature's unit) or impurity-based
+    feature importances for the forest (always non-negative, sum to 1)."""
+    est = model[-1] if isinstance(model, Pipeline) else model
+    vals = getattr(est, "feature_importances_", None)
+    if vals is None:
+        vals = est.coef_
+    return pd.Series(vals, index=features, name="weight")
 
 
 def train_direction(x: pd.DataFrame, y: pd.Series, c: float = 1.0) -> Pipeline:

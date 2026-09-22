@@ -104,6 +104,8 @@ HYPERPARAMS = [
     HyperParam(
         "linkage", "Länkning (Gruppering)", "average", ["average", "complete", "single"]
     ),
+    HyperParam("n_estimators", "Antal träd (Random Forest)", 100, [50, 100, 200, 400]),
+    HyperParam("max_depth", "Max träddjup (Random Forest)", 6, [2, 4, 6, 8, 12]),
 ]
 HP_BY_KEY = {h.key: h for h in HYPERPARAMS}
 
@@ -181,7 +183,7 @@ def live_predictor_panel(
     df: pd.DataFrame,
     feature_cols: list[str],
     target: str,
-    alpha: float = 0.0,
+    params: dict[str, Any],
     horizon: int = 0,
 ) -> None:
     """Live estimate, self-refreshing every minute (a fragment, so only this
@@ -193,7 +195,14 @@ def live_predictor_panel(
     if not live_values:
         st.caption(":red-badge[● LIVE] Ingen vald feature går att hämta live just nu.")
         return
-    prediction = controller.predict_live(df, feature_cols, target, live_values, alpha)
+    model_kw = {
+        k: params[k]
+        for k in ("alpha", "model_kind", "n_estimators", "max_depth")
+        if k in params
+    }
+    prediction = controller.predict_live(
+        df, feature_cols, target, live_values, **model_kw
+    )
     newest_local = max(timestamps.values()).to_pydatetime().astimezone()
     stale = newest_local.date() != now.date()
     when = "imorgon" if horizon else "idag"
@@ -273,7 +282,7 @@ def render_panel(panel: analysis.Panel, days: int | None) -> None:
     if panel.kind == "line":
         line_chart(data, panel.colors)
     elif panel.kind == "bar":
-        st.bar_chart(data)
+        st.bar_chart(data, horizontal=panel.horizontal)
     elif panel.kind == "table":
         if panel.gradient and data is not None:
             data = data.style.map(_corr_cell).format(precision=2)
@@ -422,6 +431,18 @@ with st.sidebar:
         st.segmented_control("Läge", list(analysis.MODES), default="Regression")
         or "Regression"
     )
+    model_kind = "linear"
+    if mode_key == "Regression":
+        model_kind = (
+            "forest"
+            if (
+                st.segmented_control(
+                    "Modell", ["Linjär", "Random Forest"], default="Linjär"
+                )
+                == "Random Forest"
+            )
+            else "linear"
+        )
 
     # Hyperparametrar: toggla på valfri delmängd (flera samtidigt), styr var och
     # en. Av = standardvärde. Bara aktiva hamnar i `params`.
@@ -447,6 +468,8 @@ with st.sidebar:
                 index=hp.options.index(hp.default),
                 key=f"hp_{key}",
             )
+    if model_kind != "linear":
+        params["model_kind"] = model_kind  # linear is the default downstream
 
 if not feature_cols:
     st.warning("Välj minst en feature i sidofältet.", icon=":material/warning:")
@@ -462,7 +485,7 @@ df_h = controller.shift_target(df, target, horizon)
 
 # ── Live estimate (hero) ─────────────────────────────────────────────────────
 with st.container(border=True):
-    live_predictor_panel(df_h, feature_cols, target, params.get("alpha", 0.0), horizon)
+    live_predictor_panel(df_h, feature_cols, target, params, horizon)
 
 # ── Main view (large focus card) ─────────────────────────────────────────────
 with st.container(border=True):

@@ -110,11 +110,16 @@ def run(
     feature_cols: list[str],
     target: str,
     alpha: float = 0.0,
+    model_kind: str = "linear",
+    n_estimators: int = 100,
+    max_depth: int = 6,
 ) -> pd.DataFrame:
     """Train on the chosen features/target and add a `predicted_{target}` column.
-    `alpha` is the Ridge L2 penalty (0 = plain OLS); see signal_model.train.
+    Model choice and knobs are forwarded to signal_model.train.
     """
-    model = signal_model.train(df, feature_cols, target, alpha=alpha)
+    model = signal_model.train(
+        df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
+    )
     df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
     return df
 
@@ -125,17 +130,22 @@ def predict_live(
     target: str,
     live_values: dict[str, float],
     alpha: float = 0.0,
+    model_kind: str = "linear",
+    n_estimators: int = 100,
+    max_depth: int = 6,
 ) -> float:
     """Train on stored history, then predict one point using live-fetched
-    feature values in place of the corresponding stored ones. `alpha` matches
-    the chart's Ridge penalty so the live estimate uses the same model.
+    feature values in place of the corresponding stored ones. The model knobs
+    match the chart's so the live estimate uses the same model.
 
     A feature missing from `live_values` (no live source, e.g. `tone`, or a
     ticker whose live fetch failed) falls back to the most recent stored
     value for that column — the same carry-forward idea as a market-closed
     day in features.build_features.
     """
-    model = signal_model.train(df, feature_cols, target, alpha=alpha)
+    model = signal_model.train(
+        df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
+    )
     latest = df.iloc[-1]
     row = {c: live_values.get(c, latest[c]) for c in feature_cols}
     live_df = pd.DataFrame([row])
@@ -146,13 +156,15 @@ def predict_live(
 class EvaluationResult:
     """Chronological train/test evaluation output: the test set carries the
     model's predictions and the naive baseline's side by side (plus each
-    one's residual), and `metrics` holds both sides' RMSE/MAE.
+    one's residual), `metrics` holds both sides' RMSE/MAE, and `weights` is
+    what the fitted model leans on per feature (see signal_model.weights).
     """
 
     train_df: pd.DataFrame
     test_df: pd.DataFrame
     baseline_kind: str
     metrics: dict[str, dict[str, float]]
+    weights: pd.Series
 
 
 def evaluate(
@@ -161,6 +173,9 @@ def evaluate(
     target: str,
     test_frac: float = 0.2,
     alpha: float = 0.0,
+    model_kind: str = "linear",
+    n_estimators: int = 100,
+    max_depth: int = 6,
 ) -> EvaluationResult:
     """Chronologically split `df`, train on the train split only, and compare
     the model's held-out test predictions against a naive baseline.
@@ -174,7 +189,9 @@ def evaluate(
     clean = evaluation.drop_market_closed(df)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
-    model = signal_model.train(train_df, feature_cols, target, alpha=alpha)
+    model = signal_model.train(
+        train_df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
+    )
     predicted = signal_model.predict(test_df, model, feature_cols)
     baseline = evaluation.naive_baseline(train_df[target], test_df[target])
 
@@ -188,7 +205,11 @@ def evaluate(
         "baseline": evaluation.regression_metrics(test_df[target], baseline),
     }
     return EvaluationResult(
-        train_df, test_df, evaluation.baseline_kind(target), metrics
+        train_df,
+        test_df,
+        evaluation.baseline_kind(target),
+        metrics,
+        signal_model.weights(model, feature_cols),
     )
 
 
