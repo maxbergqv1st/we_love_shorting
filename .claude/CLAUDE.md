@@ -23,16 +23,29 @@ Complete AI/ML project end-to-end, three required parts:
 - Pin dependencies. `logging`, never `print`, in library code.
 - `.streamlit/secrets.toml` and real data files stay git-ignored.
 
+## Architecture (layers, top-down)
+`app.py` (Streamlit view, workspace of `card()`s, sidebar = settings + AI chat) → `analysis.py` (strategy pattern: `AnalysisMode` subclasses return render-agnostic `Panel`s — **no Streamlit in the package**, unit-testable) → `controller.py` (wire sources → DB → features → models → results) → `signal_model.py` / `evaluation.py` / `features.py` → `db.py` (SQLite) + `sources/` (yahoo, gdelt). Models are **interactive-only, never persisted** — no joblib, no stale-model-on-disk state.
+
 ## Techniques & tools in use (established patterns — reuse before adding)
-- **Analysis modes = strategy pattern (`analysis.py`).** Each way to analyse the table (Regression, Riktning, Kluster) is an `AnalysisMode` subclass owning `live_panels`/`evaluate`/`evaluate_panels`/`context`. Modes return render-agnostic `Panel`s (kind = text/line/scatter/bar/table) — **no Streamlit in the package**, so modes are unit-testable without a UI. Add a mode = one entry in the `MODES` registry; the app iterates it. `app.py` holds one generic `render_panel` + `render_chatbot`.
-- **Models:** `signal_model` has regression (`train`/`predict`), 3-class direction (`train_direction`/`predict_direction`, up/flat/down via `evaluation.direction_labels` + data-driven dead-zone `direction_threshold`), and asset grouping (`cluster_assets`: AgglomerativeClustering on `1 − return-correlation` — groups streams that co-move; correlate **returns**, never trending levels, which would just cluster by era). Logistic reg needs `StandardScaler` (not scale-invariant like OLS).
-- **Chart types matter:** categorical/ordinal series (direction −1/0/1, cluster ids) → coloured scatter-over-time, never a line (a line implies false ordering/continuity). Correlation matrix → `Styler.background_gradient` heatmap via a `Panel(gradient=True)`. Level regression also shows a prediction-error line centred on 0 (overlapping actual/pred lines alone are unreadable).
-- **Streamlit API (current, not deprecated):** `width="stretch"` on `st.dataframe`, never `use_container_width=True`. `st.segmented_control` (with `or <default>` fallback for the deselect case) over `st.radio` for span pickers. Live panel is an `@st.fragment(run_every="1m")`.
-- **Session-state persistence:** persist widget picks with `key=` + `st.session_state.setdefault(...)`, then prune invalid entries each rerun — don't pass `default=` for state that must survive reruns.
-- **Derive labels/config from one source:** `LABELS` is built by looping `features.TICKERS`, not hand-maintained; a new ticker auto-gets labels. Group a stream's columns via `features.stream_of(col)` (`sp500_close`/`sp500_ret` → `sp500`).
-- **Baseline:** `naive_baseline` uses `test_target.shift(1)`, seeding row 0 from the last train value — no manual concat.
-- **AI Q&A:** `we_love_shorting.chatbot` (OpenRouter free model); key from `st.secrets["OPENROUTER_API_KEY"]`, absent → graceful in-UI error.
-- **mypy:** `ignore_missing_imports = true` in `pyproject.toml` (pandas/sklearn/joblib/yfinance ship no stubs). Run `mypy src app.py` before done.
+- **Analysis modes = strategy pattern (`analysis.py`).** Predict-a-target modes (Regression, Riktning) live in the `MODES` registry; add a mode = one entry. Target-independent views (asset grouping) are standalone functions, not modes. Modes take a **`params: dict` of hyperparameters** and forward only the keys they understand via `_kw(params, *keys)`; controller/model functions keep explicitly typed args with defaults.
+- **Hyperparameter registry (`app.py HYPERPARAMS`).** Each tunable knob is one `HyperParam(key, label, default, options)` entry; `key` == the controller argument name so it forwards straight through. UI = multiselect toggle (several at once) → slider (numeric) or selectbox (categorical). Adding a knob = one registry row + the controller default. Current: `alpha` (Ridge), `c` (logistic reg), `flat_frac` (dead-zone), `test_frac`, `n_groups`, `linkage`.
+- **Models (`signal_model`):** regression `train`/`predict` (OLS; `alpha>0` → `StandardScaler`+Ridge — Ridge/logistic/KMeans are NOT scale-invariant, OLS is), 3-class direction (`train_direction`, labels from `evaluation.direction_labels` on the target's **move** — `_ret` as-is, levels via `.diff()`, never the raw level value), asset grouping (`cluster_assets`: AgglomerativeClustering on `1 − return-correlation`; correlate **returns**, never trending levels — levels cluster by era).
+- **Charts:** all multi-series lines go through app's `line_chart()` — Altair **without pan/zoom** (native `st.line_chart` hijacks the mouse wheel) with tooltips. Categorical series → scatter/heatmap, never a line. Correlation heatmap = `Styler.map(_corr_cell)` (manual red/green rgba — **not** `background_gradient`, which needs matplotlib). Prediction-error line centred on 0 beside overlapping actual/pred lines. Many small charts → behind an opt-in `st.toggle`.
+- **Streamlit API (current, not deprecated):** `width="stretch"`, never `use_container_width`. `st.segmented_control` (with `or <default>` for deselect) over radio. `@st.dialog` for rare admin flows (Setup). `@st.fragment(run_every="1m")` for the live panel. `card()` contextmanager = bordered container + heading. Material Symbols icons over emojis.
+- **Widget state:** per-dependency keys over manual pruning — e.g. features multiselect uses `key=f"features::{target}"` + `default=` so each target keeps its own selection and options always match. Never mutate a widget's own session key mid-run. Give hyperparam widgets explicit `key=`s so picks survive reruns.
+- **Auto-eval:** no "run" button — `cached_eval` (`st.cache_data`) keyed on mode/df/features/target/`tuple(sorted(params.items()))` recomputes only when inputs change.
+- **Headless verification:** `streamlit.testing.v1.AppTest` — load `st.session_state['df']`, run, assert no exceptions/warnings and widgets render. This catches real bugs (it caught an unconditional `st.stop()` and a matplotlib crash). Do this before claiming UI work done; visual look still needs a human.
+- **Derive labels/config from one source:** `LABELS` loops `features.TICKERS`; group a stream's columns via `features.stream_of(col)`.
+- **Baseline:** `naive_baseline` uses `test_target.shift(1)` seeded from last train value; direction baseline = majority class.
+- **AI Q&A:** `chatbot.py` (OpenRouter free model + fallback + retry); key injected by caller — module stays Streamlit-free.
+- **mypy:** `ignore_missing_imports = true` in `pyproject.toml`. Run `mypy src app.py`; clear `.mypy_cache` if results look stale/nonsensical.
+
+## Security conventions
+- SQL: table names validated against the `_TABLES` whitelist (`db._table`) before any f-string interpolation; values go through pandas/params. Never interpolate unvalidated input into SQL.
+- All `urllib.request.urlopen` calls have explicit `timeout=` (gdelt 30s, chatbot 60s) — no hang-forever network calls.
+- Secrets only via `st.secrets` / `.streamlit/secrets.toml` (git-ignored, as are `data/`, `*.joblib`). Missing key → graceful in-UI error, never a crash or a hardcoded fallback.
+- No `eval`/`exec`/`shell=True`/`unsafe_allow_html` anywhere.
+- Outbound URLs are fixed constants; query params built with `urllib.parse.urlencode`.
 
 ## Domain guidance (skills auto-load when relevant)
 - General Python style/structure → `python-best-practices` skill.

@@ -1,6 +1,31 @@
+# One Dark Pro — dark trading-terminal feel. Native theming (no CSS).
 [theme]
-primaryColor = "#4c78a8"
-backgroundColor = "#0e1117"
-secondaryBackgroundColor = "#1c1f26"
-textColor = "#fafafa"
-font = "sans serif"
+base = "dark"
+primaryColor = "#61afef"
+backgroundColor = "#282c34"
+secondaryBackgroundColor = "#21252b"
+codeBackgroundColor = "#1e2127"
+textColor = "#abb2bf"
+linkColor = "#61afef"
+borderColor = "#3e4451"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "6px"
+buttonRadius = "6px"
+font = "'IBM Plex Sans':https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+codeFontSize = "13px"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["30px", "24px", "20px", "16px", "14px", "12px"]
+headingFontWeights = [600, 600, 500, 500, 500, 500]
+linkUnderline = false
+# green = up, red = down (trading convention), then the rest
+chartCategoricalColors = ["#98c379", "#e06c75", "#61afef", "#e5c07b", "#c678dd", "#56b6c2", "#d19a66"]
+greenColor = "#98c379"
+redColor = "#e06c75"
+
+[theme.sidebar]
+backgroundColor = "#21252b"
+secondaryBackgroundColor = "#282c34"
+borderColor = "#3e4451"

@@ -37,10 +37,10 @@ def test_registry_has_the_predict_modes_only():
 
 def test_regression_mode_panels_and_context():
     df, mode = _toy_df(), analysis.MODES["Regression"]
-    live = mode.live_panels(df, ["tone"], "spy_close", "S&P 500")
+    live = mode.live_panels(df, ["tone"], "spy_close", "S&P 500", {})
     assert _panel_kinds(live) == ["line", "line"]  # actual-vs-pred + error line
 
-    result = mode.evaluate(df, ["tone"], "spy_close")
+    result = mode.evaluate(df, ["tone"], "spy_close", {})
     panels = mode.evaluate_panels(result, "S&P 500")
     assert {"table", "scatter", "bar"} <= set(_panel_kinds(panels))
     assert "Mätvärden" in mode.context(result) or "Testperiod" in mode.context(result)
@@ -49,9 +49,10 @@ def test_regression_mode_panels_and_context():
 def test_direction_mode_panels_confusion_matrix():
     df, mode = _toy_df(), analysis.MODES["Riktning"]
     # rolling hit-rate line vs baseline, not a noisy per-day scatter
-    assert _panel_kinds(mode.live_panels(df, ["tone"], "spy_ret", "SPY %"))[0] == "line"
+    live = mode.live_panels(df, ["tone"], "spy_ret", "SPY %", {})
+    assert _panel_kinds(live)[0] == "line"
 
-    result = mode.evaluate(df, ["tone"], "spy_ret")
+    result = mode.evaluate(df, ["tone"], "spy_ret", {})
     tables = [p for p in mode.evaluate_panels(result, "SPY %") if p.kind == "table"]
     # accuracy table + confusion matrix
     assert len(tables) == 2
@@ -63,6 +64,22 @@ def test_asset_grouping_panels():
     panels = analysis.asset_grouping_panels(_toy_df(), feats)
     assert panels[0].kind == "table" and panels[0].gradient  # correlation heatmap
     assert any(p.kind == "table" for p in panels[1:])  # groups table
+
+
+def test_hyperparams_flow_through_params_dict():
+    df, feats = _toy_df(), ["gold_ret", "silver_ret", "oil_ret", "copper_ret"]
+    reg = analysis.MODES["Regression"]
+    # alpha (Ridge) changes the fit; test_frac changes the split size
+    base = reg.evaluate(df, ["tone"], "spy_close", {})
+    ridged = reg.evaluate(df, ["tone"], "spy_close", {"alpha": 100.0})
+    assert base.metrics["model"]["rmse"] != ridged.metrics["model"]["rmse"]
+    assert len(
+        reg.evaluate(df, ["tone"], "spy_close", {"test_frac": 0.4}).test_df
+    ) != len(base.test_df)
+    # n_groups flows into asset grouping
+    g2 = analysis.asset_grouping_panels(df, feats, {"n_groups": 2})[1].data
+    g4 = analysis.asset_grouping_panels(df, feats, {"n_groups": 4})[1].data
+    assert g2.shape[0] == 2 and g4.shape[0] == 4
 
 
 def test_group_assets_groups_comoving_streams():

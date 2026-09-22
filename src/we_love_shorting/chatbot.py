@@ -44,7 +44,7 @@ def _post(api_key: str, model: str, messages: list[dict]) -> dict:
             "Content-Type": "application/json",
         },
     )
-    with urllib.request.urlopen(req) as r:
+    with urllib.request.urlopen(req, timeout=60) as r:  # free tier can be slow
         data = json.load(r)
     if not data.get("choices"):
         raise BadResponse(data.get("error", data))

@@ -39,15 +39,24 @@ class Panel:
     data: pd.DataFrame | None = None
     x: str | None = None  # scatter: x column
     y: str | None = None  # scatter: y column
-    color: str | None = None  # scatter: column to colour points by
     colors: list[str] | None = None  # line: explicit per-series colours
     gradient: bool = False  # table: render as a −1..1 correlation heatmap
+
+
+def _kw(params: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Pick the given hyperparameter keys that are active (present) in `params`;
+    absent ones are left out so the controller's own default applies. Lets a
+    mode forward only the knobs it understands from the shared params dict."""
+    return {k: params[k] for k in keys if k in params}
 
 
 class AnalysisMode(ABC):
     """Base strategy: one predict-a-target approach over the feature table. Each
     mode owns its always-visible view (`live_panels`), its held-out evaluation
     (`evaluate` + `evaluate_panels`), and optional AI grounding (`context`).
+
+    Tunable hyperparameters flow in as a single `params` dict (only the keys the
+    user toggled on); each mode forwards the ones it understands via `_kw`.
     """
 
     label: str
@@ -55,11 +64,22 @@ class AnalysisMode(ABC):
 
     @abstractmethod
     def live_panels(
-        self, df: pd.DataFrame, feature_cols: list[str], target: str, label: str
+        self,
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        target: str,
+        label: str,
+        params: dict[str, Any],
     ) -> list[Panel]:
         """The always-visible view for this mode."""
 
-    def evaluate(self, df: pd.DataFrame, feature_cols: list[str], target: str) -> Any:
+    def evaluate(
+        self,
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        target: str,
+        params: dict[str, Any],
+    ) -> Any:
         """Held-out evaluation, cached by the app. Modes without one (evaluates
         = False) keep this default."""
         return None
@@ -77,8 +97,10 @@ class RegressionMode(AnalysisMode):
     label = "Regression"
     needs_target = True
 
-    def live_panels(self, df, feature_cols, target, label):
-        out = controller.run(df.copy(), feature_cols, target).set_index("date")
+    def live_panels(self, df, feature_cols, target, label, params):
+        out = controller.run(
+            df.copy(), feature_cols, target, **_kw(params, "alpha")
+        ).set_index("date")
         pred = f"predicted_{target}"
         chart = out[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
         # Actual and prediction nearly overlap for a level target, so the pair
@@ -99,8 +121,10 @@ class RegressionMode(AnalysisMode):
             ),
         ]
 
-    def evaluate(self, df, feature_cols, target):
-        return controller.evaluate(df, feature_cols, target)
+    def evaluate(self, df, feature_cols, target, params):
+        return controller.evaluate(
+            df, feature_cols, target, **_kw(params, "test_frac", "alpha")
+        )
 
     def evaluate_panels(self, result, label):
         test_df = result.test_df
@@ -141,11 +165,13 @@ class DirectionMode(AnalysisMode):
 
     _WINDOW = 21  # ~one trading month
 
-    def live_panels(self, df, feature_cols, target, label):
+    def live_panels(self, df, feature_cols, target, label, params):
         # Per-day hit/miss is ~coin-flip noise smeared near y=0 and unreadable.
         # A rolling hit-rate line vs the "always guess the commonest direction"
         # baseline shows when (and whether) the model actually has an edge.
-        out = controller.run_direction(df.copy(), feature_cols, target)
+        out = controller.run_direction(
+            df.copy(), feature_cols, target, **_kw(params, "flat_frac", "c")
+        )
         correct = (out["actual_dir"] == out["predicted_dir"]).astype(float)
         rolling = correct.rolling(self._WINDOW, min_periods=self._WINDOW // 2).mean()
         baseline = float(out["actual_dir"].value_counts(normalize=True).max())
@@ -167,8 +193,10 @@ class DirectionMode(AnalysisMode):
             ),
         ]
 
-    def evaluate(self, df, feature_cols, target):
-        return controller.evaluate_direction(df, feature_cols, target)
+    def evaluate(self, df, feature_cols, target, params):
+        return controller.evaluate_direction(
+            df, feature_cols, target, **_kw(params, "test_frac", "flat_frac", "c")
+        )
 
     def evaluate_panels(self, result, label):
         acc = pd.DataFrame(result.metrics).rename(
@@ -204,12 +232,16 @@ MODES: dict[str, AnalysisMode] = {
 }
 
 
-def asset_grouping_panels(df: pd.DataFrame, feature_cols: list[str]) -> list[Panel]:
+def asset_grouping_panels(
+    df: pd.DataFrame, feature_cols: list[str], params: dict[str, Any] | None = None
+) -> list[Panel]:
     """Group the selected streams by return co-movement: a correlation heatmap
     (reordered so co-moving streams form blocks on the diagonal) plus the
     resulting groups. Target-independent, so it's a standalone view, not a mode.
     """
-    result = controller.group_assets(df, feature_cols)
+    result = controller.group_assets(
+        df, feature_cols, **_kw(params or {}, "n_groups", "linkage")
+    )
     strip = {c: features.stream_of(c) for c in result.corr.columns}  # gold_ret -> gold
 
     # one row per group: "Grupp 1 | gold, silver, copper"

@@ -12,7 +12,7 @@ from .sources import gdelt, yahoo
 log = logging.getLogger(__name__)
 
 
-def _fetch_all(specs: dict) -> tuple[dict, dict]:
+def fetch_all(specs: dict) -> tuple[dict, dict]:
     """Run each {table: fetch-callable}, upserting successes independently.
 
     Every source commits on its own, so one source's failure doesn't discard the
@@ -64,17 +64,17 @@ def backfill(query: str = "recession") -> tuple[dict, dict]:
     are fixed in features.TICKERS (the UI no longer asks). GDELT tone only covers
     a rolling window (~2017 on), so its table may start later than the price
     history. Run once, then keep it current with update().
-    Returns _fetch_all's (retry, errors) pair.
+    Returns fetch_all's (retry, errors) pair.
     """
-    return _fetch_all(_sources(query, incremental=False))
+    return fetch_all(_sources(query, incremental=False))
 
 
 def update(query: str = "recession") -> tuple[dict, dict]:
     """Top up each table from its newest stored date to today (no full refetch).
     An empty table (never backfilled) falls back to the default fetch window.
-    Returns _fetch_all's (retry, errors) pair.
+    Returns fetch_all's (retry, errors) pair.
     """
-    return _fetch_all(_sources(query, incremental=True))
+    return fetch_all(_sources(query, incremental=True))
 
 
 def get_data() -> pd.DataFrame:
@@ -91,13 +91,12 @@ def run(
     df: pd.DataFrame,
     feature_cols: list[str],
     target: str,
+    alpha: float = 0.0,
 ) -> pd.DataFrame:
     """Train on the chosen features/target and add a `predicted_{target}` column.
-
-    The model is handed straight to predict, so we skip persisting it — the UI
-    calls this on every rerun and doesn't reload from disk.
+    `alpha` is the Ridge L2 penalty (0 = plain OLS); see signal_model.train.
     """
-    model = signal_model.train(df, feature_cols, target, persist=False)
+    model = signal_model.train(df, feature_cols, target, alpha=alpha)
     df[f"predicted_{target}"] = signal_model.predict(df, model, feature_cols)
     return df
 
@@ -107,16 +106,18 @@ def predict_live(
     feature_cols: list[str],
     target: str,
     live_values: dict[str, float],
+    alpha: float = 0.0,
 ) -> float:
     """Train on stored history, then predict one point using live-fetched
-    feature values in place of the corresponding stored ones.
+    feature values in place of the corresponding stored ones. `alpha` matches
+    the chart's Ridge penalty so the live estimate uses the same model.
 
     A feature missing from `live_values` (no live source, e.g. `tone`, or a
     ticker whose live fetch failed) falls back to the most recent stored
     value for that column — the same carry-forward idea as a market-closed
     day in features.build_features.
     """
-    model = signal_model.train(df, feature_cols, target, persist=False)
+    model = signal_model.train(df, feature_cols, target, alpha=alpha)
     latest = df.iloc[-1]
     row = {c: live_values.get(c, latest[c]) for c in feature_cols}
     live_df = pd.DataFrame([row])
@@ -141,6 +142,7 @@ def evaluate(
     feature_cols: list[str],
     target: str,
     test_frac: float = 0.2,
+    alpha: float = 0.0,
 ) -> EvaluationResult:
     """Chronologically split `df`, train on the train split only, and compare
     the model's held-out test predictions against a naive baseline.
@@ -154,7 +156,7 @@ def evaluate(
     clean = evaluation.drop_market_closed(df)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
-    model = signal_model.train(train_df, feature_cols, target, persist=False)
+    model = signal_model.train(train_df, feature_cols, target, alpha=alpha)
     predicted = signal_model.predict(test_df, model, feature_cols)
     baseline = evaluation.naive_baseline(train_df[target], test_df[target])
 
@@ -186,28 +188,43 @@ class DirectionResult:
     threshold: float
 
 
+def _target_move(series: pd.Series, target: str) -> pd.Series:
+    """The daily move whose direction we classify. A `_ret` column already IS
+    the day's move, so use it as-is; a level (tone, `*_close`) uses its
+    day-over-day change — classifying a level's raw value is meaningless (e.g.
+    news tone sits below zero every day, so every row would be one class).
+    """
+    return series if target.endswith("_ret") else series.diff()
+
+
 def evaluate_direction(
     df: pd.DataFrame,
     feature_cols: list[str],
     target: str,
     test_frac: float = 0.2,
+    flat_frac: float = 0.25,
+    c: float = 1.0,
 ) -> DirectionResult:
     """Like evaluate(), but classifies the *direction* of `target` (up / flat /
     down) instead of regressing its value — the tractable question for a
     near-white-noise return series (see signal_model.train_direction). Model
     accuracy is compared against always guessing train's majority direction.
+    `flat_frac` sizes the flat dead-zone; `c` is the classifier's regularisation.
 
-    The flat-class dead-zone is fitted on the train returns only and reused to
+    The flat-class dead-zone is fitted on the train moves only and reused to
     label the test actuals, so the threshold never sees held-out data.
     """
-    clean = evaluation.drop_market_closed(df)
+    clean = evaluation.drop_market_closed(df).assign(
+        _move=lambda d: _target_move(d[target], target)
+    )
+    clean = clean.dropna(subset=["_move"]).reset_index(drop=True)  # diff drops row 0
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
-    threshold = evaluation.direction_threshold(train_df[target])
-    y_train = evaluation.direction_labels(train_df[target], threshold)
-    y_test = evaluation.direction_labels(test_df[target], threshold)
+    threshold = evaluation.direction_threshold(train_df["_move"], flat_frac)
+    y_train = evaluation.direction_labels(train_df["_move"], threshold)
+    y_test = evaluation.direction_labels(test_df["_move"], threshold)
 
-    model = signal_model.train_direction(train_df[feature_cols], y_train)
+    model = signal_model.train_direction(train_df[feature_cols], y_train, c)
     predicted = signal_model.predict_direction(test_df[feature_cols], model)
     baseline = evaluation.majority_baseline(y_train, y_test.index)
 
@@ -225,15 +242,18 @@ def run_direction(
     df: pd.DataFrame,
     feature_cols: list[str],
     target: str,
+    flat_frac: float = 0.25,
+    c: float = 1.0,
 ) -> pd.DataFrame:
     """In-sample direction fit for the live chart: classify every row's
     up/flat/down and add `actual_dir`/`predicted_dir`, so a return target can
     show a followable direction view instead of a flat regression line. Trains
     on all rows (no split) like run(), so it's a fit-quality view, not held-out.
     """
-    threshold = evaluation.direction_threshold(df[target])
-    y = evaluation.direction_labels(df[target], threshold)
-    model = signal_model.train_direction(df[feature_cols], y)
+    move = _target_move(df[target], target)
+    threshold = evaluation.direction_threshold(move, flat_frac)
+    y = evaluation.direction_labels(move, threshold)
+    model = signal_model.train_direction(df[feature_cols], y, c)
     df["actual_dir"] = y.to_numpy()
     df["predicted_dir"] = signal_model.predict_direction(
         df[feature_cols], model
@@ -257,6 +277,7 @@ def group_assets(
     df: pd.DataFrame,
     feature_cols: list[str],
     n_groups: int = 3,
+    linkage: str = "average",
 ) -> AssetGroupResult:
     """Group the selected streams by how their daily returns co-move. Uses each
     selected stream's `_ret` column (returns are stationary — the honest basis
@@ -268,7 +289,7 @@ def group_assets(
         raise ValueError("Välj minst två streams med avkastning (_ret) att gruppera.")
 
     returns = df[ret_cols]
-    groups = signal_model.cluster_assets(returns, n_groups)
+    groups = signal_model.cluster_assets(returns, n_groups, linkage)
     order = groups.sort_values().index
     return AssetGroupResult(returns.corr().loc[order, order], groups.loc[order])
 

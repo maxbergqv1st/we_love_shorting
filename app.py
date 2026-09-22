@@ -1,15 +1,19 @@
-"""View: Streamlit dashboard. Run with `streamlit run app.py`."""
+"""View: Streamlit trading-style workspace. Run with `streamlit run app.py`."""
 
 import datetime as dt
 import logging
 import sys
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(
     0, str(Path(__file__).parent / "src")
 )  # ponytail: path shim, drop after `pip install -e .`
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -19,18 +23,14 @@ from we_love_shorting.sources import yahoo
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-st.markdown("### 📉 we_love_shorting")
-st.title("Price → news-tone signal")
-st.caption(
-    "SPY + precious-metal + oil prices → predicted news tone. Low tone = bearish."
+st.set_page_config(
+    page_title="we_love_shorting",
+    page_icon=":material/query_stats:",
+    layout="wide",
 )
 
-with st.sidebar:
-    st.header("Inställningar")
-    query = st.text_input("GDELT query (news tone)", "recession")  # only free knob left
-
-# Human names per stream stem (features.TICKERS is the source of the stem set,
-# so a new ticker always gets label entries — unnamed here, it falls back to the
+# Human names per stream stem (features.TICKERS is the source of the stem set, so
+# a new ticker always gets label entries — unnamed here, it falls back to the
 # stem). The _close/_ret labels derive from one name so they never drift apart.
 STREAM_NAMES = {
     "sp500": "S&P 500",
@@ -47,18 +47,76 @@ for _stem in features.TICKERS:
     LABELS[f"{_stem}_close"] = _name
     LABELS[f"{_stem}_ret"] = f"{_name} (daily % change)"
 
-# Model roadmap: only Linear Regression is implemented (signal_model.py).
-# The others are shown so the UI already has a place for them once built.
-MODELS = ["Linear Regression", "Ridge Regression 🔒", "Random Forest 🔒"]
-
 # Chart timespan filter: trading days to show, counting back from the latest row.
 TIMESPANS = {"Vecka": 5, "Månad": 21, "År": 252, "Allt": None}
+
+
+# Tunable hyperparameters. Toggle any subset on (multiselect); each active one
+# gets a control and flows into the pipeline as a `params` dict. Off = the
+# controller's own default. `key` matches the controller/model argument name so
+# it can be forwarded straight through (analysis._kw). Numeric options render a
+# slider, string options a selectbox. `default` = the value when toggled on.
+@dataclass(frozen=True)
+class HyperParam:
+    key: str
+    label: str
+    default: float | str
+    options: list  # numeric -> slider; string -> selectbox
+
+
+HYPERPARAMS = [
+    HyperParam(
+        "alpha",
+        "Ridge α — regularisering (Regression)",
+        0.0,
+        [0.0, 0.1, 1.0, 10.0, 100.0, 1000.0],
+    ),
+    HyperParam(
+        "c",
+        "Logistisk reg. C — lägre = hårdare (Riktning)",
+        1.0,
+        [0.01, 0.1, 1.0, 10.0, 100.0],
+    ),
+    HyperParam(
+        "flat_frac",
+        "Dödzon — upp/oförändrad/ner (Riktning)",
+        0.25,
+        [0.0, 0.1, 0.25, 0.5, 1.0],
+    ),
+    HyperParam(
+        "test_frac",
+        "Test-andel — train/test-split (Evaluering)",
+        0.2,
+        [0.1, 0.2, 0.3, 0.4],
+    ),
+    HyperParam("n_groups", "Antal grupper (Gruppering)", 3, [2, 3, 4, 5, 6]),
+    HyperParam(
+        "linkage", "Länkning (Gruppering)", "average", ["average", "complete", "single"]
+    ),
+]
+HP_BY_KEY = {h.key: h for h in HYPERPARAMS}
 
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
 
-# live-predictor only: intraday, never persisted, TTL matches the fragment's rerun cadence
+# live-predictor only: intraday, never persisted, TTL matches the fragment cadence
 get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
+
+
+@st.cache_data(show_spinner=False)
+def cached_eval(
+    mode_key: str,
+    df: pd.DataFrame,
+    feature_cols: tuple[str, ...],
+    target: str,
+    params_items: tuple,
+):
+    """Held-out evaluation, memoised so it auto-runs on selection without a
+    button and only recomputes when mode/features/target/params change.
+    `params_items` is `tuple(sorted(params.items()))` so it's hashable."""
+    return analysis.MODES[mode_key].evaluate(
+        df, list(feature_cols), target, dict(params_items)
+    )
 
 
 def _stems_for(cols: list[str]) -> list[str]:
@@ -89,9 +147,9 @@ def _live_feature_values(
 ) -> tuple[dict[str, float], dict[str, pd.Timestamp]]:
     """Live values for the `_close`/`_ret` columns among `feature_cols`, plus
     each contributing stem's quote timestamp. `_ret` is derived against the
-    latest stored close (today's move so far), matching the daily `_ret`
-    columns in features.build_features. A feature with no live source (e.g.
-    `tone`) is simply absent — predict_live carries its stored value forward."""
+    latest stored close (today's move so far), matching the daily `_ret` columns
+    in features.build_features. A feature with no live source (e.g. `tone`) is
+    simply absent — predict_live carries its stored value forward."""
     stems = _stems_for(feature_cols)
     fetched = _fetch_live_closes(tuple(stems))
     latest = df.iloc[-1]
@@ -109,32 +167,77 @@ def _live_feature_values(
 
 @st.fragment(run_every="1m")
 def live_predictor_panel(
-    df: pd.DataFrame, feature_cols: list[str], target: str
+    df: pd.DataFrame, feature_cols: list[str], target: str, alpha: float = 0.0
 ) -> None:
+    """Live 'today' estimate, self-refreshing every minute (a fragment, so only
+    this block reruns). The refresh + timestamp make it visibly live."""
     live_values, timestamps = _live_feature_values(df, feature_cols)
+    now = dt.datetime.now().astimezone()
     if not live_values:
-        st.info("Ingen av de valda featuresen går att hämta live just nu.")
+        st.caption(":red-badge[● LIVE] Ingen vald feature går att hämta live just nu.")
         return
-    prediction = controller.predict_live(df, feature_cols, target, live_values)
+    prediction = controller.predict_live(df, feature_cols, target, live_values, alpha)
     newest_local = max(timestamps.values()).to_pydatetime().astimezone()
-    today = dt.datetime.now().astimezone().date()
-    stale = newest_local.date() != today
+    stale = newest_local.date() != now.date()
     st.metric(
-        f"Skattning för IDAG ({today}): {LABELS.get(target, target)}",
+        f":red-badge[● LIVE] Skattning för idag · {LABELS.get(target, target)}",
         f"{prediction:.4f}",
     )
     st.caption(
-        "Detta är ingen prognos för imorgon: modellen är tränad på samma dag "
-        "(kurser → värde samma datum), så den skattar vad "
-        f"{LABELS.get(target, target)} borde vara *just nu* givet dagens live-kurser."
+        f"{len(live_values)}/{len(feature_cols)} features live "
+        f"({', '.join(LABELS.get(c, c) for c in live_values)}). "
+        f"Uppdaterad {now:%H:%M:%S}, senaste kurs {newest_local:%Y-%m-%d %H:%M}"
+        + (" · marknaden stängd" if stale else "")
     )
-    st.caption(
-        f"Baserad på {len(live_values)}/{len(feature_cols)} valda features hämtade "
-        f"live ({', '.join(LABELS.get(c, c) for c in live_values)}) — övriga "
-        "features använder senaste lagrade värde. "
-        f"Senaste notering: {newest_local:%Y-%m-%d %H:%M:%S} (lokal tid)"
-        + (" — marknaden är stängd, visar senaste handelsdata." if stale else "")
+
+
+@contextmanager
+def card(title: str):
+    """A bordered section with a heading — the workspace's repeating unit."""
+    with st.container(border=True):
+        st.markdown(f"#### {title}")
+        yield
+
+
+def _corr_cell(v: float) -> str:
+    """Green for positive correlation, red for negative, alpha by magnitude —
+    a −1..1 heatmap without pulling in matplotlib (Styler.background_gradient
+    needs it; this element-wise map doesn't)."""
+    if pd.isna(v):
+        return ""
+    rgb = "152, 195, 121" if v >= 0 else "224, 108, 117"  # theme green / red
+    return f"background-color: rgba({rgb}, {abs(v):.2f})"
+
+
+def line_chart(
+    data: pd.DataFrame, colors: list[str] | None = None, height: int | None = None
+) -> None:
+    """Date-indexed multi-series line via Altair WITHOUT pan/zoom, so scrolling
+    the page over the chart doesn't hijack the mouse wheel (native st.line_chart
+    zooms on scroll — the reported lag/'scroll away'). Tooltips still show every
+    series' value at the hovered date."""
+    x = data.index.name or "index"
+    long = data.reset_index().melt(x, var_name="Serie", value_name="Värde")
+    color = alt.Color("Serie:N", legend=alt.Legend(title=None))
+    if colors:
+        color = color.scale(range=colors)
+    chart = (
+        alt.Chart(long)
+        .mark_line()
+        .encode(
+            x=alt.X(f"{x}:T", title=None),
+            y=alt.Y("Värde:Q", title=None),
+            color=color,
+            tooltip=[
+                alt.Tooltip(f"{x}:T"),
+                "Serie",
+                alt.Tooltip("Värde:Q", format=".4f"),
+            ],
+        )
     )
+    if height:
+        chart = chart.properties(height=height)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_panel(panel: analysis.Panel, days: int | None) -> None:
@@ -150,38 +253,38 @@ def render_panel(panel: analysis.Panel, days: int | None) -> None:
     if days is not None and data is not None and panel.kind in ("line", "scatter"):
         data = data.tail(days)
     if panel.kind == "line":
-        st.line_chart(data, color=panel.colors)  # type: ignore[arg-type]  # stub rejects list[str]
+        line_chart(data, panel.colors)
     elif panel.kind == "scatter":
-        st.scatter_chart(data, x=panel.x, y=panel.y, color=panel.color)
+        st.scatter_chart(data, x=panel.x, y=panel.y)
     elif panel.kind == "bar":
         st.bar_chart(data)
     elif panel.kind == "table":
         if panel.gradient and data is not None:
-            data = data.style.background_gradient(
-                cmap="RdBu", vmin=-1, vmax=1, axis=None
-            ).format(precision=2)
+            data = data.style.map(_corr_cell).format(precision=2)
         st.dataframe(data, width="stretch")
 
 
-def render_chatbot(context_extra: str, name: str, feature_names: str) -> None:
-    """Grounded AI Q&A about the evaluation. `context_extra` is the mode's own
-    summary (metrics, test period); the rest is shared framing."""
-    st.subheader("💬 Fråga om resultatet")
-    st.caption("AI-assistent grundad i evalueringen ovan (OpenRouter, gratis-modell).")
-    quick_questions = [
-        "Varför presterar modellen bättre/sämre än baseline?",
-        "Var i testperioden är felen som störst?",
-        "Är modellen tillförlitlig nog att lita på?",
+def render_chat(context: str) -> None:
+    """Always-available AI assistant, grounded in the current workspace state —
+    not tied to having run an evaluation."""
+    st.header("Assistent", icon=":material/smart_toy:")
+    st.caption("Frågor om modellen, datan eller resultaten.")
+    quick = [
+        "Slår modellen sin baseline?",
+        "Var är felen störst?",
+        "Går riktningen att lita på?",
     ]
     clicked = None
-    for col, q in zip(st.columns(len(quick_questions)), quick_questions):
-        if col.button(q, use_container_width=True):
+    for q in quick:
+        if st.button(q, key=f"q_{q}", width="stretch"):
             clicked = q
     st.session_state.setdefault("chat_history", [])
-    for role, text in st.session_state["chat_history"]:
-        with st.chat_message(role):
-            st.write(text)
-    question = clicked or st.chat_input("Ställ en fråga om resultatet…")
+    # tall scrollable history so the chat fills the lower half of the sidebar
+    with st.container(height=340, border=False):
+        for role, text in st.session_state["chat_history"]:
+            with st.chat_message(role):
+                st.write(text)
+    question = clicked or st.chat_input("Fråga assistenten…")
     if question:
         api_key = st.secrets.get("OPENROUTER_API_KEY")
         st.session_state["chat_history"].append(("user", question))
@@ -192,7 +295,6 @@ def render_chatbot(context_extra: str, name: str, feature_names: str) -> None:
                 answer = "Ingen OPENROUTER_API_KEY hittad i .streamlit/secrets.toml."
                 st.error(answer)
             else:
-                context = f"Target: {name}. Features: {feature_names}. {context_extra}"
                 with st.spinner("Tänker…"):
                     try:
                         answer = chatbot.ask(api_key, context, question)
@@ -215,7 +317,7 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
             box.info(f"⏳ {', '.join(retry)} rate-limitad — försöker igen om {s}s…")
             time.sleep(1)
         with st.spinner(f"Försöker igen: {', '.join(retry)}…"):
-            retry, more = controller._fetch_all(retry)
+            retry, more = controller.fetch_all(retry)
             errors |= more  # a retry can still surface a non-rate-limit error
     box.empty()
     get_data.clear()  # DB changed -> reload on next "Ladda data"
@@ -224,171 +326,242 @@ def fill(label: str, fetch, retries: int = 3, cooldown: int = 60) -> None:
     if retry:
         st.warning(f"Fortfarande rate-limitad: {', '.join(retry)}. Försök igen strax.")
     if not errors and not retry:
-        st.success("Klart. Klicka 'Ladda data' för att träna på den.")
+        st.success("Klart. Klicka 'Ladda data'.", icon=":material/check_circle:")
 
 
-with st.sidebar:
-    if st.button("Första fyllning (5 år)"):
+@st.dialog("Datakällor & påfyllning", width="large")
+def setup_dialog() -> None:
+    """Rare admin actions (backfill / top-up / load), out of the main flow."""
+    query = st.text_input("GDELT-fråga (nyhetston)", "recession", key="gdelt_query")
+    if st.button(
+        "Första fyllning (~5 år)", icon=":material/download:", width="stretch"
+    ):
         fill("Hämtar ~5 års historik…", lambda: controller.backfill(query))
-
-    if st.button("Fyll på till idag"):
-        fill(
-            "Hämtar från senaste lagrade datum till idag…",
-            lambda: controller.update(query),
-        )
-
-    if st.button("Ladda data"):
+    if st.button("Fyll på till idag", icon=":material/update:", width="stretch"):
+        fill("Hämtar till idag…", lambda: controller.update(query))
+    if st.button(
+        "Ladda data", icon=":material/database:", type="primary", width="stretch"
+    ):
         try:
             st.session_state["df"] = get_data()
+            st.rerun()
         except Exception as e:  # noqa: BLE001 - empty/mismatched DB -> guide the user
-            st.error(
-                f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning' först."
+            st.error(f"Kunde inte bygga feature-tabellen: {e}. Kör 'Första fyllning'.")
+
+
+# ── Topbar ───────────────────────────────────────────────────────────────────
+df = st.session_state.get("df")
+top = st.columns([6, 4, 2], vertical_alignment="center")
+top[0].markdown("### :material/query_stats: we_love_shorting")
+if df is not None:
+    top[1].markdown(
+        f":material/database: {df['date'].min()} → {df['date'].max()} · {len(df)} rader"
+    )
+if top[2].button("Setup", icon=":material/settings:", width="stretch"):
+    setup_dialog()
+
+if df is None:
+    st.info(
+        "Öppna **Setup** för att fylla och ladda data.", icon=":material/rocket_launch:"
+    )
+    st.stop()
+
+# ── Sidebar: settings (top) ──────────────────────────────────────────────────
+candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
+default_target = features.TARGET if features.TARGET in candidates else candidates[0]
+
+with st.sidebar:
+    st.subheader("Inställningar", icon=":material/tune:")
+    target = st.selectbox(
+        "Mål — vad ska förutsägas?",
+        candidates,
+        index=candidates.index(default_target),
+        format_func=lambda c: LABELS.get(c, c),
+        key="target",
+    )
+    # Exclude the target's whole stream: choosing sp500_close (or _ret) drops
+    # both sp500_close and sp500_ret from the features. A per-target key means
+    # each target keeps its own selection and the options always match it, so
+    # there's no stale-option pruning to hand-manage.
+    target_stream = features.stream_of(target)
+    feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
+    feature_cols = st.multiselect(
+        "Features",
+        feature_opts,
+        default=feature_opts,
+        key=f"features::{target}",
+        format_func=lambda c: LABELS.get(c, c),
+    )
+    mode_key = (
+        st.segmented_control("Läge", list(analysis.MODES), default="Regression")
+        or "Regression"
+    )
+
+    # Hyperparametrar: toggla på valfri delmängd (flera samtidigt), styr var och
+    # en. Av = standardvärde. Bara aktiva hamnar i `params`.
+    st.caption(":material/tune: Hyperparametrar")
+    active = st.multiselect(
+        "Toggla på för att tuna",
+        [h.key for h in HYPERPARAMS],
+        format_func=lambda k: HP_BY_KEY[k].label,
+        label_visibility="collapsed",
+        key="active_hp",
+    )
+    params: dict[str, Any] = {}
+    for key in active:
+        hp = HP_BY_KEY[key]
+        if all(isinstance(o, int | float) for o in hp.options):
+            params[key] = st.select_slider(
+                hp.label, hp.options, value=hp.default, key=f"hp_{key}"
             )
-
-if "df" in st.session_state:
-    df = st.session_state["df"]
-    st.caption(f"✅ Data laddad: {df['date'].min()} → {df['date'].max()}")
-    # numeric columns are the feature/target menu; drop bookkeeping columns
-    candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
-
-    with st.sidebar:
-        st.subheader("Modell")
-        model_choice = st.selectbox("MODELL", MODELS)
-        if model_choice != "Linear Regression":
-            st.caption("🔒 Kommer snart — kör Linear Regression tills vidare.")
-
-        st.subheader("Vad ska modellen förutsäga?")
-        default_target = (
-            features.TARGET if features.TARGET in candidates else candidates[0]
-        )
-        target = st.selectbox(
-            "TARGET (faktiskt värde att förutsäga)",
-            candidates,
-            index=candidates.index(default_target),
-            format_func=lambda c: LABELS.get(c, c),
-        )
-        # Exclude the target's whole stream: choosing sp500_close (or _ret) as
-        # target drops both sp500_close and sp500_ret from the features.
-        target_stream = features.stream_of(target)
-        feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
-        # Persist the picks across reruns (key=), starting with everything
-        # selected, then prune anything no longer valid — crucially the current
-        # target, so choosing a column as target auto-drops it from features
-        # while keeping the rest of the selection intact.
-        st.session_state.setdefault("feature_cols", feature_opts)
-        st.session_state["feature_cols"] = [
-            c for c in st.session_state["feature_cols"] if c in feature_opts
-        ]
-        feature_cols = st.multiselect(
-            "FEATURES (förutsäg från dessa)",
-            feature_opts,
-            key="feature_cols",
-            format_func=lambda c: LABELS.get(c, c),
-        )
-
-    if feature_cols:
-        name = LABELS.get(target, target)  # e.g. "News tone", not the raw column
-        feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
-        # Pick an analysis mode from the registry. Adding a mode in
-        # analysis.MODES makes it appear here with no change to this loop.
-        mode_key = (
-            st.segmented_control("Analys", list(analysis.MODES), default="Regression")
-            or "Regression"
-        )
-        mode = analysis.MODES[mode_key]
-        st.info(f"🧠 **{mode.label}** över **{name}** från {feature_names}")
-
-        # `or "Allt"` keeps a selection even if the user deselects the control.
-        timespan = (
-            st.segmented_control("Visa", list(TIMESPANS), default="Allt") or "Allt"
-        )
-        days = TIMESPANS[timespan]
-        try:
-            for panel in mode.live_panels(df, feature_cols, target, name):
-                render_panel(panel, days)
-        except Exception as e:  # noqa: BLE001 - degenerate fit (e.g. all-flat), etc.
-            st.warning(f"Kunde inte rendera live-vyn: {e}")
-
-        # Regression-only extras: latest-value cards, the live 1-min predictor,
-        # and the market-closed-highlighted raw table.
-        if mode_key == "Regression":
-            out = controller.run(df.copy(), feature_cols, target)  # cheap: no re-fetch
-            latest = out.iloc[-1]
-            col1, col2, col3 = st.columns(3)
-            col1.metric(f"Senaste faktiska: {name}", f"{latest[target]:.2f}")
-            col2.metric(
-                f"Senaste prediktion: {name}", f"{latest[f'predicted_{target}']:.2f}"
-            )
-            col3.metric(
-                "Differens", f"{latest[f'predicted_{target}'] - latest[target]:.2f}"
-            )
-            with st.expander(
-                "🔴 Live-prediktion (testar 1 min-intervall)", expanded=True
-            ):
-                live_predictor_panel(df, feature_cols, target)
-            styled = out.style.apply(
-                lambda row: (
-                    ["background-color: #5a1f1f" if row.get("market_closed") else ""]
-                    * len(row)
-                ),
-                axis=1,
-            )  # market_closed drives the row colour; hidden via column_config
-            st.dataframe(
-                styled,
-                width="stretch",
-                column_config={"market_closed": None},  # None = hide, Styler reads it
-            )
-            st.caption(
-                "🟥 Röd rad = börsen stängd (helg/helgdag), föregående close används."
-            )
-
-        st.subheader("Evaluering (train/test)")
-        if st.button("Kör evaluering"):
-            try:
-                st.session_state["eval_result"] = mode.evaluate(
-                    df, feature_cols, target
-                )
-                st.session_state["eval_mode"] = mode_key
-                st.session_state["eval_target"] = target
-                st.session_state["eval_feature_cols"] = feature_cols
-            except Exception as e:  # noqa: BLE001 - too little data, etc.
-                st.session_state.pop("eval_result", None)
-                st.warning(f"Kunde inte evaluera: {e}")
-
-        # Only show a stored result for the mode that produced it — switching
-        # modes hides a stale result until you re-run in the new mode.
-        if (
-            "eval_result" in st.session_state
-            and st.session_state.get("eval_mode") == mode_key
-        ):
-            result = st.session_state["eval_result"]
-            # compare features as sets: reordering the same picks doesn't
-            # change the model, so it shouldn't flag the eval as stale.
-            if st.session_state.get("eval_target") != target or set(
-                st.session_state.get("eval_feature_cols", [])
-            ) != set(feature_cols):
-                st.info(
-                    "Valen ovan har ändrats sedan senaste evalueringen — "
-                    "resultaten nedan gäller föregående val. Klicka 'Kör "
-                    "evaluering' för att uppdatera."
-                )
-            for panel in mode.evaluate_panels(result, name):
-                render_panel(panel, days=None)
-            context_extra = mode.context(result)
-            if context_extra:
-                render_chatbot(context_extra, name, feature_names)
         else:
-            st.info(f"Klicka 'Kör evaluering' för resultat i läget **{mode.label}**.")
+            params[key] = st.selectbox(
+                hp.label,
+                hp.options,
+                index=hp.options.index(hp.default),
+                key=f"hp_{key}",
+            )
 
-        # Asset grouping: target-independent, so it's its own always-on section
-        # (not one of the predict-a-target modes above).
-        with st.expander(
-            "🔗 Tillgångsgruppering — vilka streams rör sig ihop (oberoende av mål)",
-        ):
-            try:
-                for panel in analysis.asset_grouping_panels(df, feature_cols):
-                    render_panel(panel, days=None)
-            except ValueError as e:
-                st.info(str(e))
+if not feature_cols:
+    st.warning("Välj minst en feature i sidofältet.", icon=":material/warning:")
+    st.stop()
+
+name = LABELS.get(target, target)
+feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
+mode = analysis.MODES[mode_key]
+
+# ── Live estimate (hero) ─────────────────────────────────────────────────────
+with st.container(border=True):
+    live_predictor_panel(df, feature_cols, target, params.get("alpha", 0.0))
+
+# ── Main view (large focus card) ─────────────────────────────────────────────
+with st.container(border=True):
+    head = st.columns([6, 6], vertical_alignment="center")
+    head[0].markdown(f"#### {mode.label} · {name}")
+    with head[1].container(horizontal=True, horizontal_alignment="right"):
+        timespan = (
+            st.segmented_control(
+                "Visa", list(TIMESPANS), default="Allt", label_visibility="collapsed"
+            )
+            or "Allt"
+        )
+    days = TIMESPANS[timespan]
+    try:
+        for panel in mode.live_panels(df, feature_cols, target, name, params):
+            render_panel(panel, days)
+    except Exception as e:  # noqa: BLE001 - degenerate fit (e.g. all-flat), etc.
+        st.warning(f"Kunde inte rendera vyn: {e}")
+
+# date-indexed view (trimmed to the timespan) shared by the charts below
+dated = df.set_index("date")
+dated = dated if days is None else dated.tail(days)
+
+
+def _indexed(cols: pd.DataFrame) -> pd.DataFrame:
+    """Index each column to 100 at its first valid value, so different price
+    levels compare on one axis and a late-starting stream doesn't vanish."""
+    return cols / cols.bfill().iloc[0] * 100
+
+
+# ── Compare (near the prediction): individual streams or asset groups ─────────
+with card("Jämför · streams eller grupper"):
+    view = (
+        st.segmented_control(
+            "Vy",
+            ["Enskilda streams", "Grupper"],
+            default="Enskilda streams",
+            label_visibility="collapsed",
+        )
+        or "Enskilda streams"
+    )
+    if view == "Enskilda streams":
+        close_cols = [c for c in df.columns if c.endswith("_close")]
+        picked = st.pills(
+            "Streams",
+            close_cols,
+            selection_mode="multi",
+            format_func=lambda c: LABELS.get(c, c),
+            default=close_cols[:3],
+            label_visibility="collapsed",
+        )
+        if picked:
+            indexed = _indexed(dated[picked]).rename(columns=lambda c: LABELS.get(c, c))
+            line_chart(indexed)
+            st.caption("Indexerat till 100 vid start — klicka i/ur streams.")
+        else:
+            st.caption("Välj en eller flera streams.")
     else:
-        st.info("Välj minst en feature.")
+        try:
+            gkw = {k: params[k] for k in ("n_groups", "linkage") if k in params}
+            groups = controller.group_assets(df, feature_cols, **gkw).groups
+            per_group: dict[str, list[pd.Series]] = {}
+            for col, gid in groups.items():
+                close = f"{features.stream_of(col)}_close"
+                if close in dated:
+                    per_group.setdefault(f"Grupp {gid + 1}", []).append(
+                        _indexed(dated[[close]])[close]
+                    )
+            gdf = pd.DataFrame(
+                {k: pd.concat(v, axis=1).mean(axis=1) for k, v in per_group.items()}
+            )
+            line_chart(gdf)
+            st.caption("Varje grupps snittutveckling (indexerad). Grupper från nedan.")
+        except ValueError as e:
+            st.caption(str(e))
+
+# ── Evaluation (auto-run, cached) ────────────────────────────────────────────
+with card("Evaluering · held-out test"):
+    try:
+        with st.spinner("Evaluerar…"):
+            result = cached_eval(
+                mode_key, df, tuple(feature_cols), target, tuple(sorted(params.items()))
+            )
+        for panel in mode.evaluate_panels(result, name):
+            render_panel(panel, None)
+        chat_metrics = str(getattr(result, "metrics", ""))
+    except Exception as e:  # noqa: BLE001 - too little data after filtering, etc.
+        st.warning(f"Kunde inte evaluera: {e}")
+        chat_metrics = ""
+
+# ── Asset grouping ───────────────────────────────────────────────────────────
+with card("Tillgångsgruppering · vilka streams rör sig ihop"):
+    try:
+        for panel in analysis.asset_grouping_panels(df, feature_cols, params):
+            render_panel(panel, None)
+    except ValueError as e:
+        st.caption(str(e))
+
+# ── Individual feature graphs (opt-in — many charts are heavy to scroll) ──────
+with card("Individuella features"):
+    if st.toggle("Visa individuella grafer", value=False):
+        for i in range(0, len(feature_cols), 3):
+            row = feature_cols[i : i + 3]
+            for col, feat in zip(st.columns(len(row)), row):
+                with col.container(border=True):
+                    st.caption(LABELS.get(feat, feat))
+                    line_chart(dated[[feat]], height=180)
+    else:
+        st.caption("Aktivera för att se varje feature för sig.")
+
+# ── Raw data (regression only, optional) ─────────────────────────────────────
+if mode_key == "Regression":
+    with st.expander("Rådata", icon=":material/table_chart:"):
+        out = controller.run(df.copy(), feature_cols, target, params.get("alpha", 0.0))
+        styled = out.style.apply(
+            lambda row: (
+                ["background-color: #4b2b2f" if row.get("market_closed") else ""]
+                * len(row)
+            ),
+            axis=1,
+        )  # market_closed drives the row colour; hidden via column_config
+        st.dataframe(styled, width="stretch", column_config={"market_closed": None})
+        st.caption("Röd rad = börsen stängd, föregående close bärs fram.")
+
+# ── Sidebar: AI assistant (lower half, always available) ─────────────────────
+with st.sidebar:
+    st.divider()
+    render_chat(
+        f"Data {df['date'].min()}–{df['date'].max()} ({len(df)} rader). "
+        f"Läge: {mode.label}. Mål: {name}. Features: {feature_names}. "
+        f"Evaluering (modell vs baseline): {chat_metrics}."
+    )
