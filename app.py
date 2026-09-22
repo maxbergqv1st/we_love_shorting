@@ -2,6 +2,7 @@
 
 import datetime as dt
 import logging
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -114,6 +115,15 @@ get_data = st.cache_data(ttl="1h")(controller.get_data)
 
 # live-predictor only: intraday, never persisted, TTL matches the fragment cadence
 get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
+
+# session-only streams: free-text ticker search + a 5y history fetch at add-time
+search_tickers = st.cache_data(ttl="1h")(yahoo.search_tickers)
+
+
+@st.cache_data(ttl="1h", show_spinner="Hämtar kurshistorik…")
+def fetch_5y(symbol: str, value_col: str) -> pd.DataFrame:
+    """Five years of daily closes for a searched-up ticker (session streams)."""
+    return yahoo.fetch_prices(symbol, "5y", value_col)
 
 
 @st.cache_data(show_spinner=False)
@@ -389,6 +399,59 @@ if df is None:
         "Öppna **Setup** för att fylla och ladda data.", icon=":material/rocket_launch:"
     )
     st.stop()
+
+# ── Sidebar: add arbitrary streams (session-only, never written to the DB) ───
+st.session_state.setdefault("extra_streams", {})  # stem -> {"name", "prices"}
+with st.sidebar, st.expander("Lägg till stream", icon=":material/search:"):
+    q = st.text_input("Sök aktie (namn eller ticker)", key="stream_query")
+    if q:
+        try:
+            hits = search_tickers(q)
+        except Exception as e:  # noqa: BLE001 - search endpoint hiccup
+            hits = []
+            st.caption(f"Sökningen misslyckades: {e}")
+        if hits:
+            pick = st.selectbox(
+                "Träffar",
+                hits,
+                format_func=lambda h: f"{h['name']} ({h['symbol']}, {h['exchange']})",
+            )
+            if st.button("Lägg till", icon=":material/add:", width="stretch"):
+                stem = re.sub(r"[^a-z0-9]", "", pick["symbol"].lower())
+                if stem in features.TICKERS or stem in ("tone", ""):
+                    st.error("Namnet krockar med en befintlig stream.")
+                else:
+                    try:
+                        prices = fetch_5y(pick["symbol"], f"{stem}_close")
+                        st.session_state["extra_streams"][stem] = {
+                            "name": pick["name"],
+                            "prices": prices,
+                        }
+                        st.rerun()
+                    except Exception as e:  # noqa: BLE001 - bad/empty ticker
+                        st.error(f"Kunde inte hämta {pick['symbol']}: {e}")
+        elif q:
+            st.caption("Inga träffar.")
+    if st.session_state["extra_streams"]:
+        names = ", ".join(v["name"] for v in st.session_state["extra_streams"].values())
+        st.caption(
+            f"Tillagda: {names}. Sessionens tabell begränsas till den "
+            "kortaste tillagda historiken."
+        )
+        if st.button("Rensa tillagda", icon=":material/delete:", width="stretch"):
+            st.session_state["extra_streams"] = {}
+            st.rerun()
+
+extra = st.session_state["extra_streams"]
+if extra:
+    try:
+        df = get_data({stem: v["prices"] for stem, v in extra.items()})
+    except Exception as e:  # noqa: BLE001 - no overlap etc. -> drop the extras
+        st.error(f"Kunde inte väva in tillagda streams: {e}")
+        st.session_state["extra_streams"] = {}
+    for stem, v in extra.items():
+        for _sfx, _fmt in _SUFFIX_LABELS.items():
+            LABELS[f"{stem}_{_sfx}"] = _fmt.format(v["name"])
 
 # ── Sidebar: settings (top) ──────────────────────────────────────────────────
 candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]

@@ -77,14 +77,21 @@ def update(query: str = "recession") -> tuple[dict, dict]:
     return fetch_all(_sources(query, incremental=True))
 
 
-def get_data() -> pd.DataFrame:
+def get_data(extra_prices: dict[str, pd.DataFrame] | None = None) -> pd.DataFrame:
     """Read the stored data and join into the wide feature table (no fetch, no
     model). Fill the DB first via backfill()/update() — the DB is the source of
     truth. Kept separate from run() so the UI can cache this once and re-train on
     different feature/target picks without touching the data sources.
+
+    `extra_prices` maps extra stem -> price frame (columns date, <stem>_close)
+    for session-only streams the user searched up in the UI. They join the
+    pipeline like any fixed stream but are never written to the DB — the
+    table-name whitelist stays intact. NOTE: build_features drops rows any
+    stream lacks, so an extra stream with a short history truncates the whole
+    table to its own span.
     """
     prices = {stem: db.load(stem) for stem in features.TICKERS}
-    return features.build_features(db.load("tone"), prices)
+    return features.build_features(db.load("tone"), prices | (extra_prices or {}))
 
 
 def shift_target(df: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
