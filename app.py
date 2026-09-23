@@ -36,7 +36,9 @@ STREAM_NAMES = {
     "copper": "Copper",
     "oil": "Crude oil",
 }
-_SUFFIX_LABELS = {
+# Format per suffix — the suffix SET is owned by features.STREAM_SUFFIXES, so
+# a new derived column gets at least a fallback label without touching this.
+_SUFFIX_FORMATS = {
     "close": "{}",
     "ret": "{} (daglig %)",
     "ma5": "{} (5d snitt)",
@@ -44,10 +46,17 @@ _SUFFIX_LABELS = {
     "vol21": "{} (21d volatilitet)",
 }
 LABELS = {"tone": "News tone"}
+
+
+def register_stream_labels(stem: str, name: str) -> None:
+    """Label every column of one stream — used for the fixed streams below and
+    for session-added streams at weave time (same formats, no drift)."""
+    for sfx in features.STREAM_SUFFIXES:
+        LABELS[f"{stem}_{sfx}"] = _SUFFIX_FORMATS.get(sfx, f"{{}} ({sfx})").format(name)
+
+
 for _stem in features.TICKERS:
-    _name = STREAM_NAMES.get(_stem, _stem)
-    for _sfx, _fmt in _SUFFIX_LABELS.items():
-        LABELS[f"{_stem}_{_sfx}"] = _fmt.format(_name)
+    register_stream_labels(_stem, STREAM_NAMES.get(_stem, _stem))
 
 # Forecast horizon: 0 = estimate today's value from today's features (nowcast),
 # 1 = train features(t) -> target(t+1), i.e. a real next-day forecast.
@@ -278,30 +287,22 @@ def live_predictor_panel(
     feature_cols: list[str],
     spec: controller.TargetSpec,
     label: str,
-    params: dict[str, Any],
+    model: signal_model.Regressor,
 ) -> None:
     """Live estimate, self-refreshing every minute (a fragment, so only this
-    block reruns). Trains on `df_train` (the prepared frame: the target's move,
-    horizon-shifted) but derives live feature values AND non-live fallbacks
-    from `df_live` (the raw frame) — the shifted frame's last rows are dropped,
-    so its tail is a trading day stale. A level target shows the reconstructed
-    level with the predicted move as delta. The refresh + timestamp make it
-    visibly live."""
+    block reruns). `model` is fitted by the caller on `df_train` (the prepared
+    frame: the target's move, horizon-shifted) and frozen between ticks — a
+    tick pays no frame-hashing cache lookup. Live feature values AND non-live
+    fallbacks come from `df_live` (the raw frame); the shifted frame's tail
+    is a trading day stale. A level target shows the reconstructed level with
+    the predicted move as delta. The refresh + timestamp make it visibly
+    live."""
     live_values, timestamps = _live_feature_values(df_live, feature_cols)
     now = dt.datetime.now().astimezone()
     if not live_values:
         st.caption(":red-badge[● LIVE] Ingen vald feature går att hämta live just nu.")
         return
-    model_kw = {k: params[k] for k in analysis.MODEL_KEYS if k in params}
-    model = train_model(df_train, feature_cols, spec.train_col, **model_kw)
-    prediction = controller.predict_live(
-        df_train,
-        feature_cols,
-        spec.train_col,
-        live_values,
-        model=model,
-        live_df=df_live,
-    )
+    prediction = controller.predict_live(model, df_live, feature_cols, live_values)
     newest_local = max(timestamps.values()).to_pydatetime().astimezone()
     stale = newest_local.date() != now.date()
     when = "imorgon" if spec.horizon else "idag"
@@ -311,8 +312,7 @@ def live_predictor_panel(
     else:
         base = _live_level_base(df_live, spec, timestamps)
         level = controller.reconstruct_level(base, prediction, spec)
-        delta = f"{prediction:+.2%}" if spec.kind == "ret" else f"{prediction:+.4f}"
-        st.metric(heading, f"{level:.2f}", delta=delta)
+        st.metric(heading, f"{level:.2f}", delta=spec.format_move(prediction))
     # the forecast in context: recent actual MOVES vs the model's prediction
     # per day (in-sample), continuing into the live forecast point. Both
     # series come from the SAME rows and share one date index, so the lines
@@ -554,7 +554,7 @@ with st.sidebar, st.expander("Lägg till stream", icon=":material/search:"):
                         st.rerun()
                     except Exception as e:  # noqa: BLE001 - bad/empty ticker
                         st.error(f"Kunde inte hämta {pick['symbol']}: {e}")
-        elif q:
+        else:
             st.caption("Inga träffar.")
     if st.session_state["extra_streams"]:
         names = ", ".join(v["name"] for v in st.session_state["extra_streams"].values())
@@ -577,8 +577,7 @@ if extra:
         st.session_state["stream_error"] = str(e)
         st.rerun()  # sidebar/labels already rendered the extras — restart clean
     for stem, v in extra.items():
-        for _sfx, _fmt in _SUFFIX_LABELS.items():
-            LABELS[f"{stem}_{_sfx}"] = _fmt.format(v["name"])
+        register_stream_labels(stem, v["name"])
 db_stats.markdown(
     f":material/database: {df['date'].min()} → {df['date'].max()} · {len(df)} rader"
 )
@@ -636,11 +635,10 @@ default_target = features.TARGET if features.TARGET in target_opts else target_o
 
 
 def stream_label(stem: str) -> str:
-    if stem == "tone":
-        return "News tone"
-    if stem in st.session_state["extra_streams"]:
-        return st.session_state["extra_streams"][stem]["name"]
-    return STREAM_NAMES.get(stem, stem)
+    """A stream's human name — LABELS already holds it for every stream, fixed
+    or session-added (tone directly; price streams via the `_close` label,
+    whose format is the bare name)."""
+    return LABELS.get(stem if stem == "tone" else f"{stem}_close", stem)
 
 
 with st.container(border=True):
@@ -683,7 +681,16 @@ df_h, spec = controller.prepare_target(df, target, horizon)
 
 # ── Live estimate (hero) ─────────────────────────────────────────────────────
 with st.container(border=True):
-    live_predictor_panel(df, df_h, feature_cols, spec, name, params)
+    # fit (or cache-hit) the model ONCE per input change, outside the fragment:
+    # fragment arguments are frozen between ticks, so the minute-refresh pays
+    # no full-frame hashing just to look the model up again
+    live_model = train_model(
+        df_h,
+        feature_cols,
+        spec.train_col,
+        **analysis._kw(params, *signal_model.MODEL_KEYS),
+    )
+    live_predictor_panel(df, df_h, feature_cols, spec, name, live_model)
 
 # ── Main view (large focus card) ─────────────────────────────────────────────
 with st.container(border=True):

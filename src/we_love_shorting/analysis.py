@@ -20,15 +20,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from . import controller, features
+from . import controller, evaluation, features
+from .signal_model import MODEL_KEYS
 
 # Numeric direction classes -> human labels, shared by the modes that show them.
 DIRECTION_LABELS = {1: "Upp", 0: "Oförändrad", -1: "Ner"}
-
-# The regressor's knobs (signal_model.train's model arguments). Single source
-# for everyone forwarding them out of a params dict (RegressionMode, the live
-# panel) — add a knob here and in signal_model.train, nowhere else.
-MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
 _ACTUAL, _PRED = "Faktisk", "Prediktion"
 SERIES_COLORS = ["#4c78a8", "#f58518"]  # actual = blue, prediction = orange
 
@@ -68,7 +64,6 @@ class AnalysisMode(ABC):
     """
 
     label: str
-    needs_target: bool
 
     @abstractmethod
     def live_panels(
@@ -88,8 +83,8 @@ class AnalysisMode(ABC):
         spec: controller.TargetSpec,
         params: dict[str, Any],
     ) -> Any:
-        """Held-out evaluation, cached by the app. Modes without one (evaluates
-        = False) keep this default."""
+        """Held-out evaluation, cached by the app. A mode without one keeps
+        this default."""
         return None
 
     def evaluate_panels(self, result: Any, label: str) -> list[Panel]:
@@ -103,7 +98,6 @@ class AnalysisMode(ABC):
 
 class RegressionMode(AnalysisMode):
     label = "Regression"
-    needs_target = True
 
     def live_panels(self, df, feature_cols, spec, label, params):
         out = controller.run(
@@ -149,26 +143,20 @@ class RegressionMode(AnalysisMode):
         # information.
         test_df = result.test_df.set_index("date")
         metrics = pd.DataFrame(result.metrics).rename(
-            columns={"model": "Modell", "baseline": "Baseline"},
-            index={"rmse": "RMSE", "mae": "MAE"},
+            index={"rmse": "RMSE", "mae": "MAE"}
         )
         if result.level_metrics:
             # move scale = model vs mean-baseline (the honest skill verdict);
             # level scale = reconstructed prediction vs persistence (intuitive)
             metrics = metrics.rename(lambda i: f"{i} (förändring)")
             level = pd.DataFrame(result.level_metrics).rename(
-                columns={"model": "Modell", "baseline": "Baseline"},
-                index={"rmse": "RMSE (nivå)", "mae": "MAE (nivå)"},
+                index={"rmse": "RMSE (nivå)", "mae": "MAE (nivå)"}
             )
             metrics = pd.concat([metrics, level])
+        metrics = metrics.rename(columns={"model": "Modell", "baseline": "Baseline"})
         # held-out chart on the MOVE scale for every kind — a reconstructed
         # level line hugs the actual by construction (see live_panels)
-        pred = next(
-            c
-            for c in test_df.columns
-            if c.startswith("predicted_") and c != "predicted_level"
-        )
-        target = pred.removeprefix("predicted_")
+        target, pred = result.target, f"predicted_{result.target}"
         held = test_df[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
         held_caption = (
             f"Held-out: faktisk vs prediktion för {label} över testperioden — "
@@ -216,7 +204,6 @@ class RegressionMode(AnalysisMode):
 
 class DirectionMode(AnalysisMode):
     label = "Riktning"
-    needs_target = True
 
     _WINDOW = 21  # ~one trading month
 
@@ -229,7 +216,10 @@ class DirectionMode(AnalysisMode):
         )
         correct = (out["actual_dir"] == out["predicted_dir"]).astype(float)
         rolling = correct.rolling(self._WINDOW, min_periods=self._WINDOW // 2).mean()
-        baseline = float(out["actual_dir"].value_counts(normalize=True).max())
+        # the same majority-baseline definition as the held-out evaluation —
+        # one concept, one source
+        majority = evaluation.majority_baseline(out["actual_dir"], out.index)
+        baseline = evaluation.direction_metrics(out["actual_dir"], majority)["accuracy"]
         chart = pd.DataFrame(
             {
                 f"Träffsäkerhet ({self._WINDOW}d glidande)": rolling.to_numpy(),

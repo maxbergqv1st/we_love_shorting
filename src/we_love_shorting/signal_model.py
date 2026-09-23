@@ -9,15 +9,17 @@ from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .features import FEATURES, TARGET
-
 type Regressor = LinearRegression | RandomForestRegressor | Pipeline
+
+# train()'s model knobs, in one place: everyone who forwards a hyperparameter
+# dict into a fit (modes, the live panel) picks exactly these keys from it.
+MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
 
 
 def train(
     df: pd.DataFrame,
-    features: list[str] = FEATURES,
-    target: str = TARGET,
+    features: list[str],
+    target: str,
     alpha: float = 0.0,
     model_kind: str = "linear",
     n_estimators: int = 100,
@@ -47,11 +49,7 @@ def train(
     return model
 
 
-def predict(
-    df: pd.DataFrame,
-    model: Regressor,
-    features: list[str] = FEATURES,
-) -> pd.Series:
+def predict(df: pd.DataFrame, model: Regressor, features: list[str]) -> pd.Series:
     return pd.Series(model.predict(df[features]), index=df.index, name="predicted")
 
 
