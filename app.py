@@ -3,16 +3,10 @@
 import datetime as dt
 import logging
 import re
-import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(
-    0, str(Path(__file__).parent / "src")
-)  # ponytail: path shim, drop after `pip install -e .`
 
 import altair as alt
 import pandas as pd
@@ -113,17 +107,11 @@ HP_BY_KEY = {h.key: h for h in HYPERPARAMS}
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
 
-# live-predictor only: intraday, never persisted, TTL matches the fragment cadence
-get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
-
 # session-only streams: free-text ticker search + a 5y history fetch at add-time
 search_tickers = st.cache_data(ttl="1h")(yahoo.search_tickers)
-
-
-@st.cache_data(ttl="1h", show_spinner="Hämtar kurshistorik…")
-def fetch_5y(symbol: str, value_col: str) -> pd.DataFrame:
-    """Five years of daily closes for a searched-up ticker (session streams)."""
-    return yahoo.fetch_prices(symbol, "5y", value_col)
+fetch_5y = st.cache_data(ttl="1h", show_spinner="Hämtar kurshistorik…")(
+    yahoo.fetch_prices
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -142,12 +130,6 @@ def cached_eval(
     )
 
 
-def _stems_for(cols: list[str]) -> list[str]:
-    """Ticker stems whose `_close` or `_ret` column is among `cols`."""
-    wanted = {features.stream_of(c) for c in cols}
-    return [s for s in features.TICKERS if s in wanted]
-
-
 @st.cache_data(ttl=60)
 def _fetch_live_closes(stems: tuple[str, ...]) -> dict[str, tuple[float, pd.Timestamp]]:
     """Latest intraday close per ticker stem. A stem whose fetch fails (closed
@@ -157,7 +139,7 @@ def _fetch_live_closes(stems: tuple[str, ...]) -> dict[str, tuple[float, pd.Time
     out = {}
     for stem in stems:
         try:
-            row = get_intraday(features.TICKERS[stem])
+            row = yahoo.fetch_intraday_price(features.TICKERS[stem])
         except Exception as e:  # noqa: BLE001 - see docstring
             log.warning("live fetch failed for %s: %s", stem, e)
             continue
@@ -173,8 +155,8 @@ def _live_feature_values(
     latest stored close (today's move so far), matching the daily `_ret` columns
     in features.build_features. A feature with no live source (e.g. `tone`) is
     simply absent — predict_live carries its stored value forward."""
-    stems = _stems_for(feature_cols)
-    fetched = _fetch_live_closes(tuple(stems))
+    wanted = {features.stream_of(c) for c in feature_cols}
+    fetched = _fetch_live_closes(tuple(s for s in features.TICKERS if s in wanted))
     latest = df.iloc[-1]
     values: dict[str, float] = {}
     timestamps: dict[str, pd.Timestamp] = {}
@@ -235,6 +217,11 @@ def card(title: str):
         yield
 
 
+def seg(label: str, options: list[str], default: str, **kw: Any) -> str:
+    """segmented_control that can't be deselected: clicking off -> the default."""
+    return st.segmented_control(label, options, default=default, **kw) or default
+
+
 def _corr_cell(v: float) -> str:
     """Green for positive correlation, red for negative, alpha by magnitude —
     a −1..1 heatmap without pulling in matplotlib (Styler.background_gradient
@@ -282,13 +269,10 @@ def render_panel(panel: analysis.Panel, days: int | None) -> None:
     if panel.caption:
         st.caption(panel.caption)
     data = panel.data
-    if panel.kind == "text":
-        return
-    # live time-series lines trim to the window; the rows are chronological so
-    # tail() keeps the most recent `days`.
-    if days is not None and data is not None and panel.kind == "line":
-        data = data.tail(days)
     if panel.kind == "line":
+        # rows are chronological, so tail() keeps the most recent `days`
+        if days is not None and data is not None:
+            data = data.tail(days)
         line_chart(data, panel.colors)
     elif panel.kind == "bar":
         st.bar_chart(data, horizontal=panel.horizontal)
@@ -422,7 +406,7 @@ with st.sidebar, st.expander("Lägg till stream", icon=":material/search:"):
                     st.error("Namnet krockar med en befintlig stream.")
                 else:
                     try:
-                        prices = fetch_5y(pick["symbol"], f"{stem}_close")
+                        prices = fetch_5y(pick["symbol"], "5y", f"{stem}_close")
                         st.session_state["extra_streams"][stem] = {
                             "name": pick["name"],
                             "prices": prices,
@@ -458,19 +442,12 @@ candidates = [c for c in df.select_dtypes("number").columns if c != "market_clos
 
 with st.sidebar:
     st.subheader("Inställningar", icon=":material/tune:")
-    horizon_key = (
-        st.segmented_control("Horisont", list(HORIZONS), default="Idag (nowcast)")
-        or "Idag (nowcast)"
-    )
+    horizon_key = seg("Horisont", list(HORIZONS), "Idag (nowcast)")
     horizon = HORIZONS[horizon_key]
-    mode_key = (
-        st.segmented_control("Läge", list(analysis.MODES), default="Regression")
-        or "Regression"
-    )
+    mode_key = seg("Läge", list(analysis.MODES), "Regression")
     model_kind = "linear"
     if mode_key == "Regression" and (
-        st.segmented_control("Modell", ["Linjär", "Random Forest"], default="Linjär")
-        == "Random Forest"
+        seg("Modell", ["Linjär", "Random Forest"], "Linjär") == "Random Forest"
     ):
         model_kind = "forest"
 
@@ -561,12 +538,7 @@ with st.container(border=True):
     head = st.columns([6, 6], vertical_alignment="center")
     head[0].markdown(f"#### {mode.label} · {name} · {horizon_key}")
     with head[1].container(horizontal=True, horizontal_alignment="right"):
-        timespan = (
-            st.segmented_control(
-                "Visa", list(TIMESPANS), default="Allt", label_visibility="collapsed"
-            )
-            or "Allt"
-        )
+        timespan = seg("Visa", list(TIMESPANS), "Allt", label_visibility="collapsed")
     days = TIMESPANS[timespan]
     try:
         for panel in mode.live_panels(df_h, feature_cols, target, name, params):
@@ -587,14 +559,11 @@ def _indexed(cols: pd.DataFrame) -> pd.DataFrame:
 
 # ── Compare (near the prediction): individual streams or asset groups ─────────
 with card("Jämför · streams eller grupper"):
-    view = (
-        st.segmented_control(
-            "Vy",
-            ["Enskilda streams", "Grupper"],
-            default="Enskilda streams",
-            label_visibility="collapsed",
-        )
-        or "Enskilda streams"
+    view = seg(
+        "Vy",
+        ["Enskilda streams", "Grupper"],
+        "Enskilda streams",
+        label_visibility="collapsed",
     )
     if view == "Enskilda streams":
         close_cols = [c for c in df.columns if c.endswith("_close")]
