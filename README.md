@@ -137,6 +137,7 @@ pip install -e ".[dev]"     # editable install; pulls runtime + dev deps
 
 streamlit run app.py        # opens the dashboard in your browser
 pytest                      # run the tests
+ruff check --fix . && ruff format .   # lint + format before committing
 ```
 
 Just want to run the app, no dev tools? `pip install -e .` (or `pip install -r requirements.txt`) is enough.
