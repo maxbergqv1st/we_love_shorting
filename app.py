@@ -2,16 +2,11 @@
 
 import datetime as dt
 import logging
-import sys
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(
-    0, str(Path(__file__).parent / "src")
-)  # ponytail: path shim, drop after `pip install -e .`
 
 import altair as alt
 import pandas as pd
@@ -112,8 +107,11 @@ HP_BY_KEY = {h.key: h for h in HYPERPARAMS}
 # reads the DB (no fetch); cleared after a top-up, 1h TTL bounds CLI-fill staleness
 get_data = st.cache_data(ttl="1h")(controller.get_data)
 
-# live-predictor only: intraday, never persisted, TTL matches the fragment cadence
-get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
+# session-only streams: free-text ticker search + a 5y history fetch at add-time
+search_tickers = st.cache_data(ttl="1h")(yahoo.search_tickers)
+fetch_5y = st.cache_data(ttl="1h", show_spinner="Hämtar kurshistorik…")(
+    yahoo.fetch_prices
+)
 
 
 @st.cache_data(show_spinner=False)
@@ -132,12 +130,6 @@ def cached_eval(
     )
 
 
-def _stems_for(cols: list[str]) -> list[str]:
-    """Ticker stems whose `_close` or `_ret` column is among `cols`."""
-    wanted = {features.stream_of(c) for c in cols}
-    return [s for s in features.TICKERS if s in wanted]
-
-
 @st.cache_data(ttl=60)
 def _fetch_live_closes(stems: tuple[str, ...]) -> dict[str, tuple[float, pd.Timestamp]]:
     """Latest intraday close per ticker stem. A stem whose fetch fails (closed
@@ -147,7 +139,7 @@ def _fetch_live_closes(stems: tuple[str, ...]) -> dict[str, tuple[float, pd.Time
     out = {}
     for stem in stems:
         try:
-            row = get_intraday(features.TICKERS[stem])
+            row = yahoo.fetch_intraday_price(features.TICKERS[stem])
         except Exception as e:  # noqa: BLE001 - see docstring
             log.warning("live fetch failed for %s: %s", stem, e)
             continue
@@ -163,8 +155,8 @@ def _live_feature_values(
     latest stored close (today's move so far), matching the daily `_ret` columns
     in features.build_features. A feature with no live source (e.g. `tone`) is
     simply absent — predict_live carries its stored value forward."""
-    stems = _stems_for(feature_cols)
-    fetched = _fetch_live_closes(tuple(stems))
+    wanted = {features.stream_of(c) for c in feature_cols}
+    fetched = _fetch_live_closes(tuple(s for s in features.TICKERS if s in wanted))
     latest = df.iloc[-1]
     values: dict[str, float] = {}
     timestamps: dict[str, pd.Timestamp] = {}
@@ -225,6 +217,11 @@ def card(title: str):
         yield
 
 
+def seg(label: str, options: list[str], default: str, **kw: Any) -> str:
+    """segmented_control that can't be deselected: clicking off -> the default."""
+    return st.segmented_control(label, options, default=default, **kw) or default
+
+
 def _corr_cell(v: float) -> str:
     """Green for positive correlation, red for negative, alpha by magnitude —
     a −1..1 heatmap without pulling in matplotlib (Styler.background_gradient
@@ -272,13 +269,10 @@ def render_panel(panel: analysis.Panel, days: int | None) -> None:
     if panel.caption:
         st.caption(panel.caption)
     data = panel.data
-    if panel.kind == "text":
-        return
-    # live time-series lines trim to the window; the rows are chronological so
-    # tail() keeps the most recent `days`.
-    if days is not None and data is not None and panel.kind == "line":
-        data = data.tail(days)
     if panel.kind == "line":
+        # rows are chronological, so tail() keeps the most recent `days`
+        if days is not None and data is not None:
+            data = data.tail(days)
         line_chart(data, panel.colors)
     elif panel.kind == "bar":
         st.bar_chart(data, horizontal=panel.horizontal)
@@ -390,50 +384,70 @@ if df is None:
     )
     st.stop()
 
+# ── Sidebar: add arbitrary streams (session-only, never written to the DB) ───
+st.session_state.setdefault("extra_streams", {})  # stem -> {"name", "prices"}
+with st.sidebar, st.expander("Lägg till stream", icon=":material/search:"):
+    q = st.text_input("Sök aktie (namn eller ticker)", key="stream_query")
+    if q:
+        try:
+            hits = search_tickers(q)
+        except Exception as e:  # noqa: BLE001 - search endpoint hiccup
+            hits = []
+            st.caption(f"Sökningen misslyckades: {e}")
+        if hits:
+            pick = st.selectbox(
+                "Träffar",
+                hits,
+                format_func=lambda h: f"{h['name']} ({h['symbol']}, {h['exchange']})",
+            )
+            if st.button("Lägg till", icon=":material/add:", width="stretch"):
+                stem = re.sub(r"[^a-z0-9]", "", pick["symbol"].lower())
+                if stem in features.TICKERS or stem in ("tone", ""):
+                    st.error("Namnet krockar med en befintlig stream.")
+                else:
+                    try:
+                        prices = fetch_5y(pick["symbol"], "5y", f"{stem}_close")
+                        st.session_state["extra_streams"][stem] = {
+                            "name": pick["name"],
+                            "prices": prices,
+                        }
+                        st.rerun()
+                    except Exception as e:  # noqa: BLE001 - bad/empty ticker
+                        st.error(f"Kunde inte hämta {pick['symbol']}: {e}")
+        elif q:
+            st.caption("Inga träffar.")
+    if st.session_state["extra_streams"]:
+        names = ", ".join(v["name"] for v in st.session_state["extra_streams"].values())
+        st.caption(
+            f"Tillagda: {names}. Sessionens tabell begränsas till den "
+            "kortaste tillagda historiken."
+        )
+        if st.button("Rensa tillagda", icon=":material/delete:", width="stretch"):
+            st.session_state["extra_streams"] = {}
+            st.rerun()
+
+extra = st.session_state["extra_streams"]
+if extra:
+    try:
+        df = get_data({stem: v["prices"] for stem, v in extra.items()})
+    except Exception as e:  # noqa: BLE001 - no overlap etc. -> drop the extras
+        st.error(f"Kunde inte väva in tillagda streams: {e}")
+        st.session_state["extra_streams"] = {}
+    for stem, v in extra.items():
+        for _sfx, _fmt in _SUFFIX_LABELS.items():
+            LABELS[f"{stem}_{_sfx}"] = _fmt.format(v["name"])
+
 # ── Sidebar: settings (top) ──────────────────────────────────────────────────
 candidates = [c for c in df.select_dtypes("number").columns if c != "market_closed"]
-default_target = features.TARGET if features.TARGET in candidates else candidates[0]
 
 with st.sidebar:
     st.subheader("Inställningar", icon=":material/tune:")
-    target = st.selectbox(
-        "Mål — vad ska förutsägas?",
-        candidates,
-        index=candidates.index(default_target),
-        format_func=lambda c: LABELS.get(c, c),
-        key="target",
-    )
-    # Exclude the target's whole stream: choosing sp500_close (or _ret) drops
-    # both sp500_close and sp500_ret from the features. A per-target key means
-    # each target keeps its own selection and the options always match it, so
-    # there's no stale-option pruning to hand-manage.
-    target_stream = features.stream_of(target)
-    feature_opts = [c for c in candidates if features.stream_of(c) != target_stream]
-    # default to the raw columns only; the derived ma/vol features are opt-in
-    # so the picker doesn't open as a wall of 35 chips.
-    raw_default = [
-        c for c in feature_opts if c == "tone" or c.endswith(("_close", "_ret"))
-    ]
-    feature_cols = st.multiselect(
-        "Features",
-        feature_opts,
-        default=raw_default,
-        key=f"features::{target}",
-        format_func=lambda c: LABELS.get(c, c),
-    )
-    horizon_key = (
-        st.segmented_control("Horisont", list(HORIZONS), default="Idag (nowcast)")
-        or "Idag (nowcast)"
-    )
+    horizon_key = seg("Horisont", list(HORIZONS), "Idag (nowcast)")
     horizon = HORIZONS[horizon_key]
-    mode_key = (
-        st.segmented_control("Läge", list(analysis.MODES), default="Regression")
-        or "Regression"
-    )
+    mode_key = seg("Läge", list(analysis.MODES), "Regression")
     model_kind = "linear"
     if mode_key == "Regression" and (
-        st.segmented_control("Modell", ["Linjär", "Random Forest"], default="Linjär")
-        == "Random Forest"
+        seg("Modell", ["Linjär", "Random Forest"], "Linjär") == "Random Forest"
     ):
         model_kind = "forest"
 
@@ -464,12 +478,51 @@ with st.sidebar:
     if model_kind != "linear":
         params["model_kind"] = model_kind  # linear is the default downstream
 
+# ── Selection (above the chart): one target, feature STREAMS as toggles ─────
+# Toggling a stream includes all its columns (close/ret/ma/vol) as features —
+# the picker works in streams, not in 5 near-identical chips per asset.
+target_opts = [c for c in candidates if c == "tone" or c.endswith(("_close", "_ret"))]
+default_target = features.TARGET if features.TARGET in target_opts else target_opts[0]
+
+
+def stream_label(stem: str) -> str:
+    if stem == "tone":
+        return "News tone"
+    if stem in st.session_state["extra_streams"]:
+        return st.session_state["extra_streams"][stem]["name"]
+    return STREAM_NAMES.get(stem, stem)
+
+
+with st.container(border=True):
+    sel = st.columns([4, 8], vertical_alignment="center")
+    target = sel[0].selectbox(
+        "Mål — vad ska förutsägas?",
+        target_opts,
+        index=target_opts.index(default_target),
+        format_func=lambda c: LABELS.get(c, c),
+        key="target",
+    )
+    # every stream in the table except the target's own (a stream must not
+    # predict itself); per-target key keeps each target's toggles separate.
+    target_stream = features.stream_of(target)
+    all_streams = list(dict.fromkeys(features.stream_of(c) for c in candidates))
+    stream_opts = [s for s in all_streams if s != target_stream]
+    picked_streams = sel[1].pills(
+        "Features — streams (alla kolumner för en vald stream räknas med)",
+        stream_opts,
+        selection_mode="multi",
+        default=stream_opts,
+        key=f"streams::{target}",
+        format_func=stream_label,
+    )
+
+feature_cols = [c for c in candidates if features.stream_of(c) in picked_streams]
 if not feature_cols:
-    st.warning("Välj minst en feature i sidofältet.", icon=":material/warning:")
+    st.warning("Toggla på minst en stream ovan.", icon=":material/warning:")
     st.stop()
 
 name = LABELS.get(target, target)
-feature_names = ", ".join(LABELS.get(c, c) for c in feature_cols)
+feature_names = ", ".join(stream_label(s) for s in picked_streams)
 mode = analysis.MODES[mode_key]
 # The forecast frame: row t's target becomes t+horizon's actual (no-op for
 # nowcast). Everything model-related below uses df_h; the compare/grouping
@@ -485,12 +538,7 @@ with st.container(border=True):
     head = st.columns([6, 6], vertical_alignment="center")
     head[0].markdown(f"#### {mode.label} · {name} · {horizon_key}")
     with head[1].container(horizontal=True, horizontal_alignment="right"):
-        timespan = (
-            st.segmented_control(
-                "Visa", list(TIMESPANS), default="Allt", label_visibility="collapsed"
-            )
-            or "Allt"
-        )
+        timespan = seg("Visa", list(TIMESPANS), "Allt", label_visibility="collapsed")
     days = TIMESPANS[timespan]
     try:
         for panel in mode.live_panels(df_h, feature_cols, target, name, params):
@@ -511,14 +559,11 @@ def _indexed(cols: pd.DataFrame) -> pd.DataFrame:
 
 # ── Compare (near the prediction): individual streams or asset groups ─────────
 with card("Jämför · streams eller grupper"):
-    view = (
-        st.segmented_control(
-            "Vy",
-            ["Enskilda streams", "Grupper"],
-            default="Enskilda streams",
-            label_visibility="collapsed",
-        )
-        or "Enskilda streams"
+    view = seg(
+        "Vy",
+        ["Enskilda streams", "Grupper"],
+        "Enskilda streams",
+        label_visibility="collapsed",
     )
     if view == "Enskilda streams":
         close_cols = [c for c in df.columns if c.endswith("_close")]

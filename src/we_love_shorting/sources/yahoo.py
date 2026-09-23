@@ -36,6 +36,26 @@ def fetch_prices(
     return df[["date", "close"]].rename(columns={"close": value_col})
 
 
+def search_tickers(query: str, max_results: int = 8) -> list[dict[str, str]]:
+    """Free-text ticker search ("adverty" -> Adverty AB + its symbols) via
+    Yahoo's search endpoint. Returns [{"symbol", "name", "exchange"}, ...];
+    an empty list when nothing matches (a bare symbol typed here can still be
+    fetched directly with fetch_prices)."""
+    import yfinance as yf
+
+    log.info("yfinance search: %s", query)
+    quotes = yf.Search(query, max_results=max_results).quotes
+    return [
+        {
+            "symbol": q["symbol"],
+            "name": (q.get("shortname") or q.get("longname") or q["symbol"]).strip(),
+            "exchange": q.get("exchange", ""),
+        }
+        for q in quotes
+        if q.get("symbol")
+    ]
+
+
 def fetch_intraday_price(symbol: str, interval: str = "1m") -> pd.Series:
     """Latest intraday price for a Yahoo ticker, for a live-preview panel only.
 

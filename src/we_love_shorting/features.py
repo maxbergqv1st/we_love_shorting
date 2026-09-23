@@ -64,6 +64,10 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
     frames = []
     for stem, frame in prices.items():
         frame = frame.copy()
+        # normalise the merge key: DB-loaded frames carry ISO strings (SQLite
+        # text) while fresh fetches carry datetime.date objects — mixed types
+        # would break the outer-merge sort below.
+        frame["date"] = pd.to_datetime(frame["date"])
         # own trading calendar, pre-merge: see the `_ret` note above. Rolling
         # windows use min_periods so a short history yields partial-window
         # stats instead of NaN-dropping its first month (std needs ≥2 obs, so
