@@ -294,35 +294,34 @@ def live_predictor_panel(
         shown = controller.reconstruct_level(base, prediction, spec)
         delta = f"{prediction:+.2%}" if spec.kind == "ret" else f"{prediction:+.4f}"
         st.metric(heading, f"{shown:.2f}", delta=delta)
-    # the forecast in context: recent actuals vs the model's prediction PER
-    # DAY (in-sample), continuing into the live forecast point. A separate
-    # per-day line makes the model's misses visible as the gap between the
-    # curves — a single anchored segment just melts into the actual line.
+    # the forecast in context: recent actual MOVES vs the model's prediction
+    # per day (in-sample), continuing into the live forecast point. Both
+    # series come from the SAME rows and share one date index, so the lines
+    # cover the same window with no gaps — and the move scale keeps the chart
+    # honest (a reconstructed level line hugs the actual by construction and
+    # the two curves melt into each other; see the charts convention).
     days = 15  # short window: over a month the daily gaps compress to nothing
-    hist = df_live.set_index("date")[spec.level_col or spec.train_col].tail(days)
-    hist.index = pd.to_datetime(hist.index)
     tail = df_train.tail(days)
     day_preds = signal_model.predict(tail, model, feature_cols)
-    if spec.kind != "identity":
-        day_preds = controller.reconstruct_level(
-            controller.level_base(tail, spec), day_preds, spec
-        )
     # each row's prediction targets t+horizon; +horizon calendar days is a
     # ponytail: approximation (a weekend shifts a forecast label one day)
-    dates = pd.to_datetime(tail["date"]) + pd.Timedelta(days=spec.horizon)
-    pred_line = pd.Series(day_preds.to_numpy(), index=pd.DatetimeIndex(dates))
-    pred_line[hist.index[-1] + pd.Timedelta(days=1)] = shown  # the live point
-    chart = pd.DataFrame({label: hist, "Prognos": pred_line})
-    chart.index.name = "date"
+    idx = pd.DatetimeIndex(
+        pd.to_datetime(tail["date"]) + pd.Timedelta(days=spec.horizon), name="date"
+    )
+    actual = pd.Series(tail[spec.train_col].to_numpy(), index=idx)
+    pred_line = pd.Series(day_preds.to_numpy(), index=idx)
+    live_date = pd.to_datetime(df_live["date"].iloc[-1]) + pd.Timedelta(days=1)
+    pred_line[max(live_date, idx[-1] + pd.Timedelta(days=1))] = prediction
+    chart = pd.DataFrame({"Faktisk förändring": actual, "Prognos": pred_line})
     line_chart(chart, colors=analysis.SERIES_COLORS)
     st.caption(
         f"{len(live_values)}/{len(feature_cols)} features live "
         f"({', '.join(LABELS.get(c, c) for c in live_values)}). "
         f"Uppdaterad {now:%H:%M:%S}, senaste kurs {newest_local:%Y-%m-%d %H:%M}"
         + (" · marknaden stängd" if stale else "")
-        + ". Grafen: blå = faktiskt värde, orange = modellens prediktion per "
-        "dag (in-sample; glappet mot blå = dagens miss); sista orange punkten "
-        "= live-prognosen, ritad ett steg efter sista lagrade dagen."
+        + ". Grafen: daglig förändring, faktisk (blå) vs modellens prediktion "
+        "(orange) på samma dagar; sista orange punkten = live-prognosen. "
+        "Nivån står i siffran ovan."
     )
 
 
