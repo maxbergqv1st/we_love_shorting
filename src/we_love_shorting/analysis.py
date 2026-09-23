@@ -9,8 +9,8 @@ registry entry, not another `if` branch.
 `live_panels` fits in-sample over every row (the live chart, a fit-quality
 view); `evaluate` runs the held-out (or unsupervised-quality) evaluation and
 returns a mode-specific result that the app caches, then `evaluate_panels`
-turns that cached result into panels. `context` feeds the AI chatbot (only the
-regression mode has anything to say; the rest return "").
+turns that cached result into panels. `context` feeds the AI chatbot the
+mode-specific grounding for the latest evaluation.
 """
 
 from abc import ABC, abstractmethod
@@ -30,7 +30,7 @@ DIRECTION_LABELS = {1: "Upp", 0: "Oförändrad", -1: "Ner"}
 # panel) — add a knob here and in signal_model.train, nowhere else.
 MODEL_KEYS = ("alpha", "model_kind", "n_estimators", "max_depth")
 _ACTUAL, _PRED = "Faktisk", "Prediktion"
-_SERIES_COLORS = ["#4c78a8", "#f58518"]  # actual = blue, prediction = orange
+SERIES_COLORS = ["#4c78a8", "#f58518"]  # actual = blue, prediction = orange
 
 
 @dataclass
@@ -59,6 +59,10 @@ class AnalysisMode(ABC):
     mode owns its always-visible view (`live_panels`), its held-out evaluation
     (`evaluate` + `evaluate_panels`), and optional AI grounding (`context`).
 
+    The target arrives as a `controller.TargetSpec` (from prepare_target): the
+    model always trains on `spec.train_col` — the target's move — and a level
+    pick additionally carries the level column for reconstruction/display.
+
     Tunable hyperparameters flow in as a single `params` dict (only the keys the
     user toggled on); each mode forwards the ones it understands via `_kw`.
     """
@@ -71,7 +75,7 @@ class AnalysisMode(ABC):
         self,
         df: pd.DataFrame,
         feature_cols: list[str],
-        target: str,
+        spec: controller.TargetSpec,
         label: str,
         params: dict[str, Any],
     ) -> list[Panel]:
@@ -81,7 +85,7 @@ class AnalysisMode(ABC):
         self,
         df: pd.DataFrame,
         feature_cols: list[str],
-        target: str,
+        spec: controller.TargetSpec,
         params: dict[str, Any],
     ) -> Any:
         """Held-out evaluation, cached by the app. Modes without one (evaluates
@@ -101,51 +105,87 @@ class RegressionMode(AnalysisMode):
     label = "Regression"
     needs_target = True
 
-    def live_panels(self, df, feature_cols, target, label, params):
+    def live_panels(self, df, feature_cols, spec, label, params):
         out = controller.run(
-            df.copy(), feature_cols, target, **_kw(params, *MODEL_KEYS)
+            df.copy(), feature_cols, spec.train_col, **_kw(params, *MODEL_KEYS)
         ).set_index("date")
-        pred = f"predicted_{target}"
-        chart = out[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
-        # Actual and prediction nearly overlap for a level target, so the pair
-        # alone "says little" — a prediction-error line centred on 0 makes the
-        # miss legible, especially zoomed to a week/month.
-        err = out[[target]].sub(out[pred].to_numpy(), axis=0)
-        err = err.rename(columns={target: "Fel (faktisk − prediktion)"})
-        return [
-            Panel(
-                "line", f"Faktisk vs prediktion: {label}", chart, colors=_SERIES_COLORS
-            ),
-            Panel(
-                "line",
-                "Prediktionsfel, centrerat kring 0 — avstånd från noll = hur "
-                "mycket modellen missar den dagen.",
-                err,
-                colors=["#e45756"],
-            ),
-        ]
-
-    def evaluate(self, df, feature_cols, target, params):
-        return controller.evaluate(
-            df, feature_cols, target, **_kw(params, "test_frac", *MODEL_KEYS)
+        pred = f"predicted_{spec.train_col}"
+        # In-sample fit view only — no error line here: in-sample error reads
+        # as skill (a forest fits ~perfectly); the honest error view is the
+        # held-out residual histogram in the evaluation card.
+        #
+        # ALWAYS the move scale, never a reconstructed level: a level curve
+        # rebuilt on the previous ACTUAL level hugs the actual by construction
+        # (that closeness is persistence, not skill) and hides the one thing
+        # the model actually says — up or down. On the move scale the
+        # prediction line's sign IS the model's daily call.
+        chart = out[[spec.train_col, pred]].rename(
+            columns={spec.train_col: _ACTUAL, pred: _PRED}
         )
+        caption = f"Faktisk vs prediktion: {label}"
+        if spec.kind != "identity":
+            caption = (
+                f"Daglig förändring, faktisk vs prediktion: {label}. Nivån är "
+                "~en random walk, så modellen tränas på förändringen — "
+                "prediktionslinjens tecken är modellens upp/ner-bedömning per "
+                "dag. Nivåskalan finns i live-kortet och i evalueringens "
+                "mätvärden."
+            )
+        return [Panel("line", caption, chart, colors=SERIES_COLORS)]
+
+    def evaluate(self, df, feature_cols, spec, params):
+        result = controller.evaluate(
+            df, feature_cols, spec.train_col, **_kw(params, "test_frac", *MODEL_KEYS)
+        )
+        if spec.kind != "identity":
+            result = controller.add_level_view(result, spec)
+        return result
 
     def evaluate_panels(self, result, label):
         # Kept deliberately tight: the metrics table (the honest model-vs-
-        # baseline verdict), the weight view (what the model leans on) and one
-        # residual view. The scatter and over-time residual lines were two
-        # more views of the same information.
-        test_df = result.test_df
+        # baseline verdict), a held-out actual-vs-prediction line, the weight
+        # view (what the model leans on) and one residual view. The scatter
+        # and over-time residual lines were two more views of the same
+        # information.
+        test_df = result.test_df.set_index("date")
         metrics = pd.DataFrame(result.metrics).rename(
             columns={"model": "Modell", "baseline": "Baseline"},
             index={"rmse": "RMSE", "mae": "MAE"},
         )
+        if result.level_metrics:
+            # move scale = model vs mean-baseline (the honest skill verdict);
+            # level scale = reconstructed prediction vs persistence (intuitive)
+            metrics = metrics.rename(lambda i: f"{i} (förändring)")
+            level = pd.DataFrame(result.level_metrics).rename(
+                columns={"model": "Modell", "baseline": "Baseline"},
+                index={"rmse": "RMSE (nivå)", "mae": "MAE (nivå)"},
+            )
+            metrics = pd.concat([metrics, level])
+        # held-out chart on the MOVE scale for every kind — a reconstructed
+        # level line hugs the actual by construction (see live_panels)
+        pred = next(
+            c
+            for c in test_df.columns
+            if c.startswith("predicted_") and c != "predicted_level"
+        )
+        target = pred.removeprefix("predicted_")
+        held = test_df[[target, pred]].rename(columns={target: _ACTUAL, pred: _PRED})
+        held_caption = (
+            f"Held-out: faktisk vs prediktion för {label} över testperioden — "
+            "data modellen aldrig sett."
+        )
+        if result.level_metrics:
+            held_caption += (
+                " Skalan är den dagliga förändringen; prediktionens tecken = "
+                "modellens upp/ner-bedömning. Nivå-RMSE:n står i tabellen ovan."
+            )
         w = result.weights.reindex(result.weights.abs().sort_values().index)
-        counts, edges = np.histogram(test_df["residual"], bins=20)
+        counts, edges = np.histogram(result.test_df["residual"], bins=20)
         mids = (edges[:-1] + edges[1:]) / 2
         hist = pd.DataFrame({"Antal": counts}, index=pd.Index(mids, name="Residual"))
         return [
             Panel("table", "Mätvärden (modell vs baseline)", metrics),
+            Panel("line", held_caption, held, colors=SERIES_COLORS),
             Panel(
                 "bar",
                 "Vad modellen lutar sig på: koefficienter (linjär/Ridge — Ridges "
@@ -159,12 +199,19 @@ class RegressionMode(AnalysisMode):
 
     def context(self, result):
         test_df = result.test_df
-        return (
+        text = (
             f"Baseline-typ: {result.baseline_kind}. "
-            f"Mätvärden (modell vs baseline): {result.metrics}. "
+            f"Mätvärden på daglig förändring (modell vs baseline): "
+            f"{result.metrics}. "
             f"Testperiod: {test_df['date'].min()} till {test_df['date'].max()} "
             f"({len(test_df)} rader)."
         )
+        if result.level_metrics:
+            text += (
+                " Nivåskala (rekonstruerad prediktion vs persistence): "
+                f"{result.level_metrics}."
+            )
+        return text
 
 
 class DirectionMode(AnalysisMode):
@@ -173,12 +220,12 @@ class DirectionMode(AnalysisMode):
 
     _WINDOW = 21  # ~one trading month
 
-    def live_panels(self, df, feature_cols, target, label, params):
+    def live_panels(self, df, feature_cols, spec, label, params):
         # Per-day hit/miss is ~coin-flip noise smeared near y=0 and unreadable.
         # A rolling hit-rate line vs the "always guess the commonest direction"
         # baseline shows when (and whether) the model actually has an edge.
         out = controller.run_direction(
-            df.copy(), feature_cols, target, **_kw(params, "flat_frac", "c")
+            df.copy(), feature_cols, spec.train_col, **_kw(params, "flat_frac", "c")
         )
         correct = (out["actual_dir"] == out["predicted_dir"]).astype(float)
         rolling = correct.rolling(self._WINDOW, min_periods=self._WINDOW // 2).mean()
@@ -197,13 +244,16 @@ class DirectionMode(AnalysisMode):
                 "baseline-linjen = modellen slår 'gissa alltid vanligaste "
                 "riktningen'; under = ingen edge.",
                 chart,
-                colors=_SERIES_COLORS,
+                colors=SERIES_COLORS,
             ),
         ]
 
-    def evaluate(self, df, feature_cols, target, params):
+    def evaluate(self, df, feature_cols, spec, params):
         return controller.evaluate_direction(
-            df, feature_cols, target, **_kw(params, "test_frac", "flat_frac", "c")
+            df,
+            feature_cols,
+            spec.train_col,
+            **_kw(params, "test_frac", "flat_frac", "c"),
         )
 
     def evaluate_panels(self, result, label):
@@ -220,8 +270,9 @@ class DirectionMode(AnalysisMode):
         return [
             Panel(
                 "text",
-                f"Dödzon för 'oförändrad': ±{result.threshold:.4f} (0.25 × "
-                "tränings-std). Baseline = gissa alltid vanligaste klassen.",
+                f"Dödzon för 'oförändrad': ±{result.threshold:.4f} "
+                f"({result.flat_frac:g} × tränings-std). "
+                "Baseline = gissa alltid vanligaste klassen.",
             ),
             Panel("table", "Träffsäkerhet (modell vs baseline)", acc),
             Panel(
@@ -230,6 +281,13 @@ class DirectionMode(AnalysisMode):
                 confusion,
             ),
         ]
+
+    def context(self, result):
+        return (
+            f"Riktningsklassificering (upp/oförändrad/ner). "
+            f"Träffsäkerhet (modell vs majoritets-baseline): {result.metrics}. "
+            f"Dödzon för 'oförändrad': ±{result.threshold:.4f}."
+        )
 
 
 # Registry: the predict-a-target modes the user switches between. Add a mode =

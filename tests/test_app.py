@@ -16,7 +16,13 @@ def _fake_df(rows: int = 120) -> pd.DataFrame:
     """A feature table shaped like features.build_features' output."""
     rng = np.random.default_rng(0)
     dates = pd.date_range("2024-01-02", periods=rows, freq="B")
-    cols: dict = {"date": dates.date, "tone": rng.normal(size=rows)}
+    cols: dict = {
+        "date": dates.date,
+        "tone": rng.normal(size=rows),
+        # always present in build_features' output; without it the evaluation
+        # card fails into its except and the test would never exercise it
+        "market_closed": np.zeros(rows, dtype=bool),
+    }
     for stem in features.TICKERS:
         close = pd.Series(np.cumsum(rng.normal(size=rows)) + 100)
         cols[f"{stem}_close"] = close
@@ -39,4 +45,5 @@ def test_app_renders_without_exceptions(monkeypatch):
     at.session_state["df"] = _fake_df()
     at.run()
     assert not at.exception
+    assert not at.warning  # a card that fails into its except shows st.warning
     assert at.main.children  # widgets actually rendered

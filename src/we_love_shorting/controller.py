@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
 
@@ -122,6 +123,98 @@ def shift_target(df: pd.DataFrame, target: str, horizon: int) -> pd.DataFrame:
     return out.dropna(subset=[target]).reset_index(drop=True)
 
 
+@dataclass(frozen=True)
+class TargetSpec:
+    """How the picked target is trained and displayed. The model always trains
+    on `train_col` — the target's MOVE. A price level is a near-random-walk:
+    trained on the level, the model mostly re-learns persistence ("tomorrow ≈
+    today") and the actual signal (the move) drowns. `level_col` is the
+    original level column, kept for reconstructing a level view; None when the
+    pick already is a move. `kind` picks the arithmetic: "ret" multiplicative,
+    "diff" additive, "identity" no reconstruction.
+    """
+
+    train_col: str
+    level_col: str | None
+    kind: str  # "ret" | "diff" | "identity"
+    horizon: int
+
+
+def prepare_target(
+    df: pd.DataFrame, target: str, horizon: int = 0
+) -> tuple[pd.DataFrame, TargetSpec]:
+    """Re-target a level pick to its move, then horizon-shift the MOVE column.
+
+    Order matters: the re-target must happen BEFORE the shift — shifting the
+    level column and re-targeting afterwards would leave the move column at
+    nowcast alignment while the user asked for a forecast.
+
+    `X_close` uses the stream's existing `X_ret` column; a level without a ret
+    sibling (tone) gets a computed `<target>_diff` column (absolute day-over-day
+    change). A `_ret` pick passes through untouched (identity).
+    """
+    if target.endswith("_ret"):
+        spec = TargetSpec(target, None, "identity", horizon)
+    elif target.endswith("_close"):
+        spec = TargetSpec(f"{features.stream_of(target)}_ret", target, "ret", horizon)
+    else:
+        move_col = f"{target}_diff"
+        df = df.assign(**{move_col: df[target].diff()})
+        spec = TargetSpec(move_col, target, "diff", horizon)
+    out = shift_target(df, spec.train_col, horizon)
+    # a computed diff has no move on its first row — NaN would poison the fit
+    out = out.dropna(subset=[spec.train_col]).reset_index(drop=True)
+    return out, spec
+
+
+def level_base(frame: pd.DataFrame, spec: TargetSpec) -> pd.Series:
+    """The known level each prediction builds on. For a forecast (horizon ≥ 1)
+    the row's own level column IS the previous trading day's level — the shift
+    moved only the move column. For a nowcast the previous level is backed out
+    of the row itself (level ⊖ its actual move): exact per row, no calendar
+    alignment needed."""
+    level = frame[spec.level_col]
+    if spec.horizon >= 1:
+        return level
+    move = frame[spec.train_col]
+    # ponytail: on carried-forward (market-closed) rows the ffill'd move makes
+    # this back-out drift from the true previous level — cosmetic in the
+    # in-sample chart, and evaluation drops those rows anyway.
+    return level / (1 + move) if spec.kind == "ret" else level - move
+
+
+def reconstruct_level(base, moves, spec: TargetSpec):
+    """Predicted level from a predicted move: multiplicative for returns,
+    additive for diffs. Works elementwise on Series and on scalars (the live
+    panel)."""
+    return base * (1 + moves) if spec.kind == "ret" else base + moves
+
+
+def add_level_view(result: "EvaluationResult", spec: TargetSpec) -> "EvaluationResult":
+    """Attach the level-scale view to a move-trained evaluation: reconstructed
+    level prediction, persistence baseline and level-scale metrics on test_df.
+
+    Persistence on the level scale IS "predict zero move", so its prediction is
+    the base itself — the model beats persistence on the level exactly when the
+    move model beats always-predict-0 on the move.
+    """
+    test = result.test_df
+    base = level_base(test, spec)
+    # the actual level AT THE TARGET TIME (t+horizon), rebuilt from the actual
+    # move — NOT the row's level column, which at horizon>=1 is feature-time
+    # (t) and identical to the base, which would score persistence a fake 0
+    actual = reconstruct_level(base, test[spec.train_col], spec)
+    pred = reconstruct_level(base, test[f"predicted_{spec.train_col}"], spec)
+    test["actual_level"] = actual
+    test["predicted_level"] = pred
+    test["baseline_level"] = base
+    result.level_metrics = {
+        "model": evaluation.regression_metrics(actual, pred),
+        "baseline": evaluation.regression_metrics(actual, base),
+    }
+    return result
+
+
 def run(
     df: pd.DataFrame,
     feature_cols: list[str],
@@ -150,23 +243,29 @@ def predict_live(
     model_kind: str = "linear",
     n_estimators: int = 100,
     max_depth: int = 6,
+    model: Any = None,
+    live_df: pd.DataFrame | None = None,
 ) -> float:
     """Train on stored history, then predict one point using live-fetched
     feature values in place of the corresponding stored ones. The model knobs
-    match the chart's so the live estimate uses the same model.
+    match the chart's so the live estimate uses the same model. Pass a
+    pre-fitted `model` to skip the retrain (the app caches one per input set
+    so the minute-refresh doesn't refit).
 
     A feature missing from `live_values` (no live source, e.g. `tone`, or a
     ticker whose live fetch failed) falls back to the most recent stored
     value for that column — the same carry-forward idea as a market-closed
-    day in features.build_features.
+    day in features.build_features. The fallback reads `live_df` when given:
+    with a forecast horizon, `df` is the shifted frame whose tail rows are
+    dropped, so its last row is a trading day older than the raw frame's.
     """
-    model = signal_model.train(
-        df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
-    )
-    latest = df.iloc[-1]
+    if model is None:
+        model = signal_model.train(
+            df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
+        )
+    latest = (df if live_df is None else live_df).iloc[-1]
     row = {c: live_values.get(c, latest[c]) for c in feature_cols}
-    live_df = pd.DataFrame([row])
-    return float(signal_model.predict(live_df, model, feature_cols).iloc[0])
+    return float(signal_model.predict(pd.DataFrame([row]), model, feature_cols).iloc[0])
 
 
 @dataclass
@@ -182,6 +281,9 @@ class EvaluationResult:
     baseline_kind: str
     metrics: dict[str, dict[str, float]]
     weights: pd.Series
+    # level-scale view when the target was re-targeted to its move
+    # (see add_level_view); None for a plain `_ret` target
+    level_metrics: dict[str, dict[str, float]] | None = None
 
 
 def evaluate(
@@ -242,43 +344,36 @@ class DirectionResult:
     test_df: pd.DataFrame
     metrics: dict[str, dict[str, float]]
     threshold: float
-
-
-def _target_move(series: pd.Series, target: str) -> pd.Series:
-    """The daily move whose direction we classify. A `_ret` column already IS
-    the day's move, so use it as-is; a level (tone, `*_close`) uses its
-    day-over-day change — classifying a level's raw value is meaningless (e.g.
-    news tone sits below zero every day, so every row would be one class).
-    """
-    return series if target.endswith("_ret") else series.diff()
+    flat_frac: float  # the multiplier behind `threshold`, for honest captions
 
 
 def evaluate_direction(
     df: pd.DataFrame,
     feature_cols: list[str],
-    target: str,
+    move_col: str,
     test_frac: float = 0.2,
     flat_frac: float = 0.25,
     c: float = 1.0,
 ) -> DirectionResult:
-    """Like evaluate(), but classifies the *direction* of `target` (up / flat /
-    down) instead of regressing its value — the tractable question for a
-    near-white-noise return series (see signal_model.train_direction). Model
-    accuracy is compared against always guessing train's majority direction.
-    `flat_frac` sizes the flat dead-zone; `c` is the classifier's regularisation.
+    """Like evaluate(), but classifies the *direction* of the target's move
+    (up / flat / down) instead of regressing its value — the tractable question
+    for a near-white-noise series (see signal_model.train_direction).
+    `move_col` is the target's MOVE column from prepare_target (classifying a
+    raw level is meaningless: news tone sits below zero every day, so every row
+    would be one class). Model accuracy is compared against always guessing
+    train's majority direction. `flat_frac` sizes the flat dead-zone; `c` is
+    the classifier's regularisation.
 
     The flat-class dead-zone is fitted on the train moves only and reused to
     label the test actuals, so the threshold never sees held-out data.
     """
-    clean = evaluation.drop_market_closed(df).assign(
-        _move=lambda d: _target_move(d[target], target)
-    )
-    clean = clean.dropna(subset=["_move"]).reset_index(drop=True)  # diff drops row 0
+    clean = evaluation.drop_market_closed(df)
+    clean = clean.dropna(subset=[move_col]).reset_index(drop=True)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
-    threshold = evaluation.direction_threshold(train_df["_move"], flat_frac)
-    y_train = evaluation.direction_labels(train_df["_move"], threshold)
-    y_test = evaluation.direction_labels(test_df["_move"], threshold)
+    threshold = evaluation.direction_threshold(train_df[move_col], flat_frac)
+    y_train = evaluation.direction_labels(train_df[move_col], threshold)
+    y_test = evaluation.direction_labels(test_df[move_col], threshold)
 
     model = signal_model.train_direction(train_df[feature_cols], y_train, c)
     predicted = signal_model.predict_direction(test_df[feature_cols], model)
@@ -291,22 +386,26 @@ def evaluate_direction(
         "model": evaluation.direction_metrics(y_test, predicted),
         "baseline": evaluation.direction_metrics(y_test, baseline),
     }
-    return DirectionResult(train_df, test_df, metrics, threshold)
+    return DirectionResult(train_df, test_df, metrics, threshold, flat_frac)
 
 
 def run_direction(
     df: pd.DataFrame,
     feature_cols: list[str],
-    target: str,
+    move_col: str,
     flat_frac: float = 0.25,
     c: float = 1.0,
 ) -> pd.DataFrame:
     """In-sample direction fit for the live chart: classify every row's
     up/flat/down and add `actual_dir`/`predicted_dir`, so a return target can
-    show a followable direction view instead of a flat regression line. Trains
-    on all rows (no split) like run(), so it's a fit-quality view, not held-out.
+    show a followable direction view instead of a flat regression line.
+    `move_col` is the target's MOVE column from prepare_target. Trains on all
+    rows (no split) like run(), so it's a fit-quality view, not held-out.
     """
-    move = _target_move(df[target], target)
+    # a computed diff has no move on its first row — NaN would silently label
+    # as 0/'Oförändrad' (evaluate_direction drops the same way)
+    df = df.dropna(subset=[move_col]).reset_index(drop=True)
+    move = df[move_col]
     threshold = evaluation.direction_threshold(move, flat_frac)
     y = evaluation.direction_labels(move, threshold)
     model = signal_model.train_direction(df[feature_cols], y, c)

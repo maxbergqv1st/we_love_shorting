@@ -11,6 +11,15 @@ model, and show the result in a Streamlit dashboard.
 > predicted tone = bearish sentiment = a shorting cue), but in the dashboard
 > **any numeric stream can be the target** and the rest become the features.
 
+When the target is a *level* (a closing price, or tone), the model actually
+trains on its **daily move** (return or day-over-day change) — a level is close
+to a random walk, so training on it directly mostly re-learns "tomorrow ≈
+today". The charts therefore show the move scale: the prediction line's sign is
+the model's daily up/down call. The level only appears where it's honest — the
+live card's forecast figure (previous actual level + predicted move) and the
+level-scale metrics — never as a full reconstructed curve, which would hug the
+actual by construction (persistence, not skill).
+
 ---
 
 ## How it fits together
@@ -140,7 +149,9 @@ pytest                      # run the tests
 ruff check --fix . && ruff format .   # lint + format before committing
 ```
 
-Just want to run the app, no dev tools? `pip install -e .` (or `pip install -r requirements.txt`) is enough.
+Just want to run the app, no dev tools? `pip install -e .` is enough. (The
+editable install is required — plain `pip install -r requirements.txt` gets the
+dependencies but doesn't make the `we_love_shorting` package importable.)
 
 In the dashboard:
 
