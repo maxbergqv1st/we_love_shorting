@@ -156,8 +156,10 @@ get_data = st.cache_data(ttl="1h")(controller.get_data)
 get_intraday = st.cache_data(ttl=60)(yahoo.fetch_intraday_price)
 
 # one fitted model per (frame, features, target, knobs): the minute-refresh and
-# full-page reruns reuse it instead of refitting (in-memory only, never on disk)
-train_model = st.cache_resource(show_spinner=False)(signal_model.train)
+# full-page reruns reuse it instead of refitting (in-memory only, never on
+# disk). max_entries bounds the cache — a 400-tree forest is tens of MB, and
+# without a cap every knob/target/stream combination pins one forever.
+train_model = st.cache_resource(show_spinner=False, max_entries=16)(signal_model.train)
 
 # session-only streams: free-text ticker search + a 5y history fetch at add-time
 search_tickers = st.cache_data(ttl="1h")(yahoo.search_tickers)
@@ -166,7 +168,7 @@ fetch_5y = st.cache_data(ttl="1h", show_spinner="Hämtar kurshistorik…")(
 )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=32)
 def cached_eval(
     mode_key: str,
     df: pd.DataFrame,
@@ -183,7 +185,7 @@ def cached_eval(
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=32)
 def cached_live(
     mode_key: str,
     df: pd.DataFrame,
@@ -229,21 +231,44 @@ def _live_feature_values(
     simply absent — predict_live carries its stored value forward."""
     wanted = {features.stream_of(c) for c in feature_cols}
     fetched = _fetch_live_closes([s for s in features.TICKERS if s in wanted])
-    # the _ret base must be a PRIOR day's close: after an intraday top-up the
-    # last stored row can be today's own, which would collapse live _ret to ~0
-    today = dt.datetime.now().astimezone().date()
-    past = df[pd.to_datetime(df["date"]).dt.date < today]
-    latest = (past if len(past) else df).iloc[-1]
     values: dict[str, float] = {}
     timestamps: dict[str, pd.Timestamp] = {}
     for stem, (close, ts) in fetched.items():
         if f"{stem}_close" in feature_cols:
             values[f"{stem}_close"] = close
         if f"{stem}_ret" in feature_cols:
-            prev_close = latest[f"{stem}_close"]
+            # base = last stored close BEFORE the quote's own trading day —
+            # anchored to the exchange's date, not the user's local calendar
+            # (a CET user past midnight must not see today's topped-up row as
+            # yesterday's), so an intraday top-up row can't make the live
+            # return collapse to ~0 against itself
+            past = df[df["date"] < ts.date()]
+            prev_close = (past if len(past) else df)[f"{stem}_close"].iloc[-1]
             values[f"{stem}_ret"] = (close - prev_close) / prev_close
         timestamps[stem] = ts
     return values, timestamps
+
+
+def _live_level_base(
+    df: pd.DataFrame, spec: controller.TargetSpec, timestamps: dict[str, pd.Timestamp]
+) -> float:
+    """The level today's live prediction builds on. Forecast (horizon >= 1):
+    TODAY's level — the target's own live close when it's a fixed ticker
+    (otherwise the intraday move would silently be dropped), else the latest
+    stored level. Nowcast: the last stored level BEFORE the quotes' trading
+    day — the same anchor the live `_ret`s use — since after an intraday
+    top-up the frame's last row is today's own."""
+    assert spec.level_col is not None  # only called for level targets
+    stem = features.stream_of(spec.level_col)
+    if spec.horizon >= 1:
+        if stem in features.TICKERS:
+            fetched = _fetch_live_closes([stem])
+            if stem in fetched:
+                return fetched[stem][0]
+        return float(df[spec.level_col].iloc[-1])
+    today = max(ts.date() for ts in timestamps.values())
+    past = df[df["date"] < today]
+    return float((past if len(past) else df)[spec.level_col].iloc[-1])
 
 
 @st.fragment(run_every="1m")
@@ -282,18 +307,12 @@ def live_predictor_panel(
     when = "imorgon" if spec.horizon else "idag"
     heading = f":red-badge[● LIVE] Prognos {when} · {label}"
     if spec.kind == "identity":
-        shown = prediction
         st.metric(heading, f"{prediction:.4f}")
     else:
-        # base = the level the move builds on. horizon>=1: latest stored level.
-        # nowcast: the PREVIOUS day's level — level_base backs it out per row,
-        # but needs the move column, which only the prepared frame carries; at
-        # horizon 0 that frame's tail equals the raw frame's, so it's current.
-        frame = df_live if spec.horizon >= 1 else df_train
-        base = float(controller.level_base(frame, spec).iloc[-1])
-        shown = controller.reconstruct_level(base, prediction, spec)
+        base = _live_level_base(df_live, spec, timestamps)
+        level = controller.reconstruct_level(base, prediction, spec)
         delta = f"{prediction:+.2%}" if spec.kind == "ret" else f"{prediction:+.4f}"
-        st.metric(heading, f"{shown:.2f}", delta=delta)
+        st.metric(heading, f"{level:.2f}", delta=delta)
     # the forecast in context: recent actual MOVES vs the model's prediction
     # per day (in-sample), continuing into the live forecast point. Both
     # series come from the SAME rows and share one date index, so the lines
@@ -310,8 +329,11 @@ def live_predictor_panel(
     )
     actual = pd.Series(tail[spec.train_col].to_numpy(), index=idx)
     pred_line = pd.Series(day_preds.to_numpy(), index=idx)
-    live_date = pd.to_datetime(df_live["date"].iloc[-1]) + pd.Timedelta(days=1)
-    pred_line[max(live_date, idx[-1] + pd.Timedelta(days=1))] = prediction
+    # the live point sits on its target day (quote-anchored "today" +
+    # horizon); on a topped-up frame it overwrites today's in-sample point
+    # instead of duplicating the day
+    live_day = max(ts.date() for ts in timestamps.values())
+    pred_line[pd.Timestamp(live_day) + pd.Timedelta(days=spec.horizon)] = prediction
     chart = pd.DataFrame({"Faktisk förändring": actual, "Prognos": pred_line})
     line_chart(chart, colors=analysis.SERIES_COLORS)
     st.caption(
