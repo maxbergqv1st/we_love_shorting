@@ -113,6 +113,20 @@ def test_add_level_view_persistence_equals_previous_level():
         assert set(side) == {"rmse", "mae"}
 
 
+def test_prepare_target_diff_spans_trading_days_at_horizon():
+    # tone changes on closed days too; the forecast move must still be
+    # open-row-to-open-row (Fri -> Mon), never Mon−Sun
+    df = _level_df()
+    open_tone = df.loc[~df["market_closed"], "tone"].to_numpy()
+    df_h, spec = controller.prepare_target(df, "tone", horizon=1)
+    assert df_h["tone_diff"].tolist() == pytest.approx(list(np.diff(open_tone)))
+    # and the level view rebuilds the NEXT open day's tone exactly
+    rebuilt = controller.reconstruct_level(
+        controller.level_base(df_h, spec), df_h["tone_diff"], spec
+    )
+    assert rebuilt.tolist() == pytest.approx(list(open_tone[1:]))
+
+
 def test_add_level_view_forecast_scores_against_the_next_level():
     df = _level_df()
     df_h, spec = controller.prepare_target(df, "y_close", horizon=1)

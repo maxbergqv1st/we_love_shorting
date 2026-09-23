@@ -159,6 +159,12 @@ def prepare_target(
         spec = TargetSpec(f"{features.stream_of(target)}_ret", target, "ret", horizon)
     else:
         move_col = f"{target}_diff"
+        if horizon and "market_closed" in df.columns:
+            # the diff must span the SAME trading-day steps the shift uses:
+            # diffing the full daily calendar first would hand a Friday row
+            # Monday−Sunday as its shifted move (tone keeps changing on closed
+            # days; prices don't — their ffill makes the ret kind immune)
+            df = df[~df["market_closed"]].reset_index(drop=True)
         df = df.assign(**{move_col: df[target].diff()})
         spec = TargetSpec(move_col, target, "diff", horizon)
     out = shift_target(df, spec.train_col, horizon)
