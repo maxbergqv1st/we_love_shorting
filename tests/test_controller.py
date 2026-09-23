@@ -37,6 +37,97 @@ def test_shift_target_shifts_over_trading_days_only():
     assert controller.shift_target(df, "y", horizon=0) is df
 
 
+def _level_df() -> pd.DataFrame:
+    # closes with carried-forward values on the closed rows (idx 3 and 7),
+    # like build_features' ffill produces; `_ret` computed the same way.
+    close = [100.0, 102.0, 101.0, 101.0, 104.0, 106.0, 105.0, 105.0, 108.0, 110.0]
+    df = _df("y_close", close)
+    df["y_ret"] = pd.Series(close).pct_change().fillna(0.0)
+    df["tone"] = [0.5, -0.2, 0.1, 0.4, -0.6, 0.3, 0.2, -0.1, 0.0, 0.7]
+    return df
+
+
+def test_prepare_target_retargets_levels_to_their_move():
+    df = _level_df()
+    # a close target trains on the stream's existing ret column
+    df_h, spec = controller.prepare_target(df, "y_close")
+    assert spec == controller.TargetSpec("y_ret", "y_close", "ret", 0)
+    assert len(df_h) == len(df)  # nowcast: frame untouched
+    # a level without a ret sibling gets a computed diff, first row dropped
+    df_t, spec_t = controller.prepare_target(df, "tone")
+    assert spec_t == controller.TargetSpec("tone_diff", "tone", "diff", 0)
+    assert len(df_t) == len(df) - 1
+    assert df_t["tone_diff"].iloc[0] == pytest.approx(-0.7)  # tone[1] - tone[0]
+    # a ret target passes through untouched
+    _, spec_r = controller.prepare_target(df, "y_ret")
+    assert spec_r == controller.TargetSpec("y_ret", None, "identity", 0)
+
+
+def test_prepare_target_shifts_the_move_not_the_level():
+    df = _level_df()
+    df_h, _spec = controller.prepare_target(df, "y_close", horizon=1)
+    # open-row rets, each row handed the NEXT one; the level column stays put
+    open_ret = df.loc[~df["market_closed"], "y_ret"].tolist()
+    assert df_h["y_ret"].tolist() == pytest.approx(open_ret[1:])
+    assert df_h["y_close"].tolist() == pytest.approx(
+        df.loc[~df["market_closed"], "y_close"].tolist()[:-1]
+    )
+
+
+def test_reconstruction_recovers_the_actual_level_exactly():
+    df = _level_df()
+    # nowcast: base backed out of the row itself -> actual move recovers level
+    df_h, spec = controller.prepare_target(df, "y_close")
+    base = controller.level_base(df_h, spec)
+    rebuilt = controller.reconstruct_level(base, df_h["y_ret"], spec)
+    assert rebuilt.tolist() == pytest.approx(df_h["y_close"].tolist())
+    # forecast: base = the row's own level -> actual move gives the NEXT level
+    df_1, spec_1 = controller.prepare_target(df, "y_close", horizon=1)
+    rebuilt = controller.reconstruct_level(
+        controller.level_base(df_1, spec_1), df_1["y_ret"], spec_1
+    )
+    next_open_close = df.loc[~df["market_closed"], "y_close"].tolist()[1:]
+    assert rebuilt.tolist() == pytest.approx(next_open_close)
+    # additive kind: tone_diff rebuilds tone
+    df_t, spec_t = controller.prepare_target(df, "tone")
+    rebuilt = controller.reconstruct_level(
+        controller.level_base(df_t, spec_t), df_t["tone_diff"], spec_t
+    )
+    assert rebuilt.tolist() == pytest.approx(df_t["tone"].tolist())
+
+
+def test_add_level_view_persistence_equals_previous_level():
+    df = _level_df()
+    df_h, spec = controller.prepare_target(df, "y_close")
+    result = controller.evaluate(df_h, ["x"], spec.train_col)
+    result = controller.add_level_view(result, spec)
+    # persistence on the level scale == predict zero move == the base itself
+    test = result.test_df
+    assert test["baseline_level"].tolist() == pytest.approx(
+        (test["y_close"] / (1 + test["y_ret"])).tolist()
+    )
+    # nowcast: the actual level at target time is the row's own level
+    assert test["actual_level"].tolist() == pytest.approx(test["y_close"].tolist())
+    assert set(result.level_metrics) == {"model", "baseline"}
+    for side in result.level_metrics.values():
+        assert set(side) == {"rmse", "mae"}
+
+
+def test_add_level_view_forecast_scores_against_the_next_level():
+    df = _level_df()
+    df_h, spec = controller.prepare_target(df, "y_close", horizon=1)
+    result = controller.evaluate(df_h, ["x"], spec.train_col)
+    result = controller.add_level_view(result, spec)
+    test = result.test_df
+    # at horizon 1 the actual is TOMORROW's level (base × (1 + actual move)),
+    # not the row's own level column — scoring against the row's own level
+    # would hand persistence a fake RMSE of 0
+    assert test["actual_level"].tolist() == pytest.approx(
+        (test["y_close"] * (1 + test["y_ret"])).tolist()
+    )
+    assert result.level_metrics["baseline"]["rmse"] > 0
+
+
 def test_evaluate_drops_closed_rows_then_splits_chronologically():
     df = _df("y", [10, 12, 11, 13, 14, 15, 16, 17, 18, 19])
 

@@ -37,6 +37,7 @@ def test_chronological_split_respects_order_and_ratio():
 
 def test_baseline_kind_mean_for_ret_persistence_otherwise():
     assert evaluation.baseline_kind("sp500_ret") == "mean"
+    assert evaluation.baseline_kind("tone_diff") == "mean"  # prepare_target's move
     assert evaluation.baseline_kind("sp500_close") == "persistence"
     assert evaluation.baseline_kind("tone") == "persistence"
 

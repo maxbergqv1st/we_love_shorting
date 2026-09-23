@@ -61,14 +61,15 @@ def chronological_split(
 def baseline_kind(target: str) -> str:
     """Which naive baseline `naive_baseline` uses for `target`.
 
-    `"mean"` for a `<stem>_ret` column: returns are close to stationary/white
-    noise, so "yesterday's return predicts today's" is a weak baseline — the
-    historical mean is the standard naive forecast for a return series.
+    `"mean"` for a move column — `<stem>_ret`, or a `<target>_diff` computed
+    by controller.prepare_target: moves are close to stationary/white noise,
+    so "yesterday's move predicts today's" is a weak baseline — the historical
+    mean is the standard naive forecast for a move series.
     `"persistence"` for anything else (price levels, tone): those are highly
     autocorrelated, so carrying the last actual value forward is the
     standard, much stronger naive benchmark for a level series.
     """
-    return "mean" if target.endswith("_ret") else "persistence"
+    return "mean" if target.endswith(("_ret", "_diff")) else "persistence"
 
 
 def naive_baseline(train_target: pd.Series, test_target: pd.Series) -> pd.Series:

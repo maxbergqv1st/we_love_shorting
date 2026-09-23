@@ -35,30 +35,59 @@ def test_registry_has_the_predict_modes_only():
     assert list(analysis.MODES) == ["Regression", "Riktning"]
 
 
-def test_regression_mode_panels_and_context():
-    df, mode = _toy_df(), analysis.MODES["Regression"]
-    live = mode.live_panels(df, ["tone"], "spy_close", "S&P 500", {})
-    assert _panel_kinds(live) == ["line", "line"]  # actual-vs-pred + error line
+def test_regression_mode_level_target_trains_on_move_and_reconstructs():
+    mode = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_close")
+    assert spec.train_col == "spy_ret" and spec.kind == "ret"  # move, not level
 
-    result = mode.evaluate(df, ["tone"], "spy_close", {})
+    live = mode.live_panels(df_h, ["tone"], spec, "S&P 500", {})
+    assert _panel_kinds(live) == ["line"]  # actual-vs-pred; no in-sample error line
+    # the chart shows the MOVE (a reconstructed level hugs the actual by
+    # construction and hides the model's up/down call)
+    assert "förändring" in live[0].caption
+
+    result = mode.evaluate(df_h, ["tone"], spec, {})
     panels = mode.evaluate_panels(result, "S&P 500")
-    # tight on purpose: metrics table + weight view + one residual view
-    assert _panel_kinds(panels) == ["table", "bar", "bar"]
-    assert panels[1].horizontal  # weights read best as sideways bars
-    assert "Mätvärden" in mode.context(result) or "Testperiod" in mode.context(result)
+    # tight on purpose: metrics + held-out line + weight view + one residual view
+    assert _panel_kinds(panels) == ["table", "line", "bar", "bar"]
+    assert panels[2].horizontal  # weights read best as sideways bars
+    # both scales in the metrics table: move (honest) + reconstructed level
+    assert result.level_metrics is not None
+    assert any("nivå" in str(i) for i in panels[0].data.index)
+    assert "Testperiod" in mode.context(result)
+
+
+def test_regression_mode_ret_target_stays_identity():
+    mode = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_ret")
+    assert spec.kind == "identity" and spec.train_col == "spy_ret"
+    result = mode.evaluate(df_h, ["tone"], spec, {})
+    assert result.level_metrics is None
+    panels = mode.evaluate_panels(result, "SPY %")
+    assert _panel_kinds(panels) == ["table", "line", "bar", "bar"]
 
 
 def test_direction_mode_panels_confusion_matrix():
-    df, mode = _toy_df(), analysis.MODES["Riktning"]
+    mode = analysis.MODES["Riktning"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_ret")
     # rolling hit-rate line vs baseline, not a noisy per-day scatter
-    live = mode.live_panels(df, ["tone"], "spy_ret", "SPY %", {})
+    live = mode.live_panels(df_h, ["tone"], spec, "SPY %", {})
     assert _panel_kinds(live)[0] == "line"
 
-    result = mode.evaluate(df, ["tone"], "spy_ret", {})
+    result = mode.evaluate(df_h, ["tone"], spec, {})
     tables = [p for p in mode.evaluate_panels(result, "SPY %") if p.kind == "table"]
     # accuracy table + confusion matrix
     assert len(tables) == 2
-    assert mode.context(result) == ""  # no chatbot for the direction mode
+    # chat grounding names the accuracy metrics and the dead-zone
+    assert "Träffsäkerhet" in mode.context(result)
+
+
+def test_direction_mode_level_target_classifies_its_move():
+    mode = analysis.MODES["Riktning"]
+    df_h, spec = controller.prepare_target(_toy_df(), "tone")
+    assert spec.train_col == "tone_diff" and spec.kind == "diff"
+    result = mode.evaluate(df_h, ["spy_ret"], spec, {})
+    assert result.threshold > 0  # dead-zone sized on the diff's std
 
 
 def test_asset_grouping_panels():
@@ -71,13 +100,14 @@ def test_asset_grouping_panels():
 def test_hyperparams_flow_through_params_dict():
     df, feats = _toy_df(), ["gold_ret", "silver_ret", "oil_ret", "copper_ret"]
     reg = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(df, "spy_close")
     # alpha (Ridge) changes the fit; test_frac changes the split size
-    base = reg.evaluate(df, ["tone"], "spy_close", {})
-    ridged = reg.evaluate(df, ["tone"], "spy_close", {"alpha": 100.0})
+    base = reg.evaluate(df_h, ["tone"], spec, {})
+    ridged = reg.evaluate(df_h, ["tone"], spec, {"alpha": 100.0})
     assert base.metrics["model"]["rmse"] != ridged.metrics["model"]["rmse"]
-    assert len(
-        reg.evaluate(df, ["tone"], "spy_close", {"test_frac": 0.4}).test_df
-    ) != len(base.test_df)
+    assert len(reg.evaluate(df_h, ["tone"], spec, {"test_frac": 0.4}).test_df) != len(
+        base.test_df
+    )
     # n_groups flows into asset grouping
     g2 = analysis.asset_grouping_panels(df, feats, {"n_groups": 2})[1].data
     g4 = analysis.asset_grouping_panels(df, feats, {"n_groups": 4})[1].data
