@@ -3,7 +3,6 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 import pandas as pd
 
@@ -139,6 +138,11 @@ class TargetSpec:
     kind: str  # "ret" | "diff" | "identity"
     horizon: int
 
+    def format_move(self, x: float) -> str:
+        """Human formatting for a move of this kind — beside the kind's
+        arithmetic so view code never enumerates kinds itself."""
+        return f"{x:+.2%}" if self.kind == "ret" else f"{x:+.4f}"
+
 
 def prepare_target(
     df: pd.DataFrame, target: str, horizon: int = 0
@@ -241,35 +245,20 @@ def run(
 
 
 def predict_live(
+    model: signal_model.Regressor,
     df: pd.DataFrame,
     feature_cols: list[str],
-    target: str,
     live_values: dict[str, float],
-    alpha: float = 0.0,
-    model_kind: str = "linear",
-    n_estimators: int = 100,
-    max_depth: int = 6,
-    model: Any = None,
-    live_df: pd.DataFrame | None = None,
 ) -> float:
-    """Train on stored history, then predict one point using live-fetched
-    feature values in place of the corresponding stored ones. The model knobs
-    match the chart's so the live estimate uses the same model. Pass a
-    pre-fitted `model` to skip the retrain (the app caches one per input set
-    so the minute-refresh doesn't refit).
-
-    A feature missing from `live_values` (no live source, e.g. `tone`, or a
-    ticker whose live fetch failed) falls back to the most recent stored
-    value for that column — the same carry-forward idea as a market-closed
-    day in features.build_features. The fallback reads `live_df` when given:
-    with a forecast horizon, `df` is the shifted frame whose tail rows are
-    dropped, so its last row is a trading day older than the raw frame's.
+    """Predict one point from a fitted model, using live-fetched feature
+    values where available. A feature missing from `live_values` (no live
+    source, e.g. `tone`, or a ticker whose live fetch failed) falls back to
+    `df`'s most recent stored value — the same carry-forward idea as a
+    market-closed day in features.build_features. Pass the RAW frame as
+    `df`: with a forecast horizon the training frame's tail rows are
+    dropped, so its last row is a trading day stale.
     """
-    if model is None:
-        model = signal_model.train(
-            df, feature_cols, target, alpha, model_kind, n_estimators, max_depth
-        )
-    latest = (df if live_df is None else live_df).iloc[-1]
+    latest = df.iloc[-1]
     row = {c: live_values.get(c, latest[c]) for c in feature_cols}
     return float(signal_model.predict(pd.DataFrame([row]), model, feature_cols).iloc[0])
 
@@ -284,6 +273,7 @@ class EvaluationResult:
 
     train_df: pd.DataFrame
     test_df: pd.DataFrame
+    target: str  # what was regressed; predictions live in f"predicted_{target}"
     baseline_kind: str
     metrics: dict[str, dict[str, float]]
     weights: pd.Series
@@ -332,6 +322,7 @@ def evaluate(
     return EvaluationResult(
         train_df,
         test_df,
+        target,
         evaluation.baseline_kind(target),
         metrics,
         signal_model.weights(model, feature_cols),
@@ -346,7 +337,6 @@ class DirectionResult:
     that split flat from up/down.
     """
 
-    train_df: pd.DataFrame
     test_df: pd.DataFrame
     metrics: dict[str, dict[str, float]]
     threshold: float
@@ -373,8 +363,9 @@ def evaluate_direction(
     The flat-class dead-zone is fitted on the train moves only and reused to
     label the test actuals, so the threshold never sees held-out data.
     """
+    # the move column arrives NaN-free from prepare_target (the one owner of
+    # the first-row-diff drop), so no re-cleaning here
     clean = evaluation.drop_market_closed(df)
-    clean = clean.dropna(subset=[move_col]).reset_index(drop=True)
     train_df, test_df = evaluation.chronological_split(clean, test_frac)
 
     threshold = evaluation.direction_threshold(train_df[move_col], flat_frac)
@@ -392,7 +383,7 @@ def evaluate_direction(
         "model": evaluation.direction_metrics(y_test, predicted),
         "baseline": evaluation.direction_metrics(y_test, baseline),
     }
-    return DirectionResult(train_df, test_df, metrics, threshold, flat_frac)
+    return DirectionResult(test_df, metrics, threshold, flat_frac)
 
 
 def run_direction(
@@ -408,9 +399,8 @@ def run_direction(
     `move_col` is the target's MOVE column from prepare_target. Trains on all
     rows (no split) like run(), so it's a fit-quality view, not held-out.
     """
-    # a computed diff has no move on its first row — NaN would silently label
-    # as 0/'Oförändrad' (evaluate_direction drops the same way)
-    df = df.dropna(subset=[move_col]).reset_index(drop=True)
+    # the move column arrives NaN-free from prepare_target — a NaN here would
+    # silently label as 0/'Oförändrad'
     move = df[move_col]
     threshold = evaluation.direction_threshold(move, flat_frac)
     y = evaluation.direction_labels(move, threshold)

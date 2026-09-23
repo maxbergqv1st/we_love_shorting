@@ -1,4 +1,3 @@
-# src/we_love_shorting/retry.py
 """Generic retry decorator for transient failures (rate limits, flaky network, etc.)."""
 
 import logging

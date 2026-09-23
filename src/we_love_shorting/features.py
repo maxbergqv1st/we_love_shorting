@@ -83,13 +83,13 @@ def build_features(tone: pd.DataFrame, prices: dict[str, pd.DataFrame]) -> pd.Da
             ret.rolling(21, min_periods=2).std().bfill().fillna(0.0)
         )
         frames.append(frame)
-    ref_dates = pd.to_datetime(frames[0]["date"])  # reference market's trading days
+    # every frame's date is already datetime64 (normalised above) — the merge
+    # key and merge_asof below need no re-conversion
+    ref_dates = frames[0]["date"]  # reference market's trading days
     merged = frames[0]
     for frame in frames[1:]:
         merged = merged.merge(frame, on="date", how="outer")
     merged = merged.sort_values("date")
-    # merge_asof needs datetime64 keys, not datetime.date objects.
-    merged["date"] = pd.to_datetime(merged["date"])
     # market_date holds the date only on reference trading days (NaT otherwise);
     # ffill then makes it the most recent reference close, so days the reference
     # market was shut keep pointing back at it even if another exchange traded.
