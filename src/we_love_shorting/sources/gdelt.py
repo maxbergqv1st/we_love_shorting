@@ -20,7 +20,7 @@ GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
 def _get_json(url: str) -> dict:
     """GET JSON with backoff — GDELT rate-limits per IP with 429s."""
     req = urllib.request.Request(url, headers={"User-Agent": "we_love_shorting/0.1"})
-    with urllib.request.urlopen(req) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
 

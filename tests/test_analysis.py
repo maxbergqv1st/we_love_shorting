@@ -1,0 +1,122 @@
+"""Each analysis mode returns render-agnostic Panels on toy data — no Streamlit
+needed, which is the point of keeping the modes render-free."""
+
+import numpy as np
+import pandas as pd
+
+from we_love_shorting import analysis, controller
+
+
+def _toy_df(n: int = 60) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    close = 100 + np.cumsum(rng.normal(0, 1, n))
+    gold = rng.normal(0, 0.01, n)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=n).date,
+            "tone": rng.normal(0, 1, n),
+            "spy_close": close,
+            "spy_ret": np.r_[0.0, np.diff(close) / close[:-1]],
+            "gold_ret": gold,
+            "silver_ret": gold * 0.95 + rng.normal(0, 0.001, n),  # co-moves with gold
+            "oil_ret": rng.normal(0, 0.01, n),
+            "copper_ret": rng.normal(0, 0.01, n),
+            "market_closed": False,
+        }
+    )
+
+
+def _panel_kinds(panels):
+    return [p.kind for p in panels]
+
+
+def test_registry_has_the_predict_modes_only():
+    # asset grouping is not a mode — it's a standalone target-independent view
+    assert list(analysis.MODES) == ["Regression", "Riktning"]
+
+
+def test_regression_mode_level_target_trains_on_move_and_reconstructs():
+    mode = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_close")
+    assert spec.train_col == "spy_ret" and spec.kind == "ret"  # move, not level
+
+    live = mode.live_panels(df_h, ["tone"], spec, "S&P 500", {})
+    assert _panel_kinds(live) == ["line"]  # actual-vs-pred; no in-sample error line
+    # the chart shows the MOVE (a reconstructed level hugs the actual by
+    # construction and hides the model's up/down call)
+    assert "förändring" in live[0].caption
+
+    result = mode.evaluate(df_h, ["tone"], spec, {})
+    panels = mode.evaluate_panels(result, "S&P 500")
+    # tight on purpose: metrics + held-out line + weight view + one residual view
+    assert _panel_kinds(panels) == ["table", "line", "bar", "bar"]
+    assert panels[2].horizontal  # weights read best as sideways bars
+    # both scales in the metrics table: move (honest) + reconstructed level
+    assert result.level_metrics is not None
+    assert any("nivå" in str(i) for i in panels[0].data.index)
+    assert "Testperiod" in mode.context(result)
+
+
+def test_regression_mode_ret_target_stays_identity():
+    mode = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_ret")
+    assert spec.kind == "identity" and spec.train_col == "spy_ret"
+    result = mode.evaluate(df_h, ["tone"], spec, {})
+    assert result.level_metrics is None
+    panels = mode.evaluate_panels(result, "SPY %")
+    assert _panel_kinds(panels) == ["table", "line", "bar", "bar"]
+
+
+def test_direction_mode_panels_confusion_matrix():
+    mode = analysis.MODES["Riktning"]
+    df_h, spec = controller.prepare_target(_toy_df(), "spy_ret")
+    # rolling hit-rate line vs baseline, not a noisy per-day scatter
+    live = mode.live_panels(df_h, ["tone"], spec, "SPY %", {})
+    assert _panel_kinds(live)[0] == "line"
+
+    result = mode.evaluate(df_h, ["tone"], spec, {})
+    tables = [p for p in mode.evaluate_panels(result, "SPY %") if p.kind == "table"]
+    # accuracy table + confusion matrix
+    assert len(tables) == 2
+    # chat grounding names the accuracy metrics and the dead-zone
+    assert "Träffsäkerhet" in mode.context(result)
+
+
+def test_direction_mode_level_target_classifies_its_move():
+    mode = analysis.MODES["Riktning"]
+    df_h, spec = controller.prepare_target(_toy_df(), "tone")
+    assert spec.train_col == "tone_diff" and spec.kind == "diff"
+    result = mode.evaluate(df_h, ["spy_ret"], spec, {})
+    assert result.threshold > 0  # dead-zone sized on the diff's std
+
+
+def test_asset_grouping_panels():
+    feats = ["gold_ret", "silver_ret", "oil_ret", "copper_ret"]
+    panels = analysis.asset_grouping_panels(_toy_df(), feats)
+    assert panels[0].kind == "table" and panels[0].gradient  # correlation heatmap
+    assert any(p.kind == "table" for p in panels[1:])  # groups table
+
+
+def test_hyperparams_flow_through_params_dict():
+    df, feats = _toy_df(), ["gold_ret", "silver_ret", "oil_ret", "copper_ret"]
+    reg = analysis.MODES["Regression"]
+    df_h, spec = controller.prepare_target(df, "spy_close")
+    # alpha (Ridge) changes the fit; test_frac changes the split size
+    base = reg.evaluate(df_h, ["tone"], spec, {})
+    ridged = reg.evaluate(df_h, ["tone"], spec, {"alpha": 100.0})
+    assert base.metrics["model"]["rmse"] != ridged.metrics["model"]["rmse"]
+    assert len(reg.evaluate(df_h, ["tone"], spec, {"test_frac": 0.4}).test_df) != len(
+        base.test_df
+    )
+    # n_groups flows into asset grouping
+    g2 = analysis.asset_grouping_panels(df, feats, {"n_groups": 2})[1].data
+    g4 = analysis.asset_grouping_panels(df, feats, {"n_groups": 4})[1].data
+    assert g2.shape[0] == 2 and g4.shape[0] == 4
+
+
+def test_group_assets_groups_comoving_streams():
+    df = _toy_df()
+    r = controller.group_assets(df, ["gold_ret", "silver_ret", "oil_ret", "copper_ret"])
+    assert r.corr.shape == (4, 4)
+    # gold & silver are built to co-move -> land in the same group
+    assert r.groups["gold_ret"] == r.groups["silver_ret"]

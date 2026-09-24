@@ -4,6 +4,15 @@ import pytest
 from we_love_shorting import features
 
 
+def test_stream_of_groups_all_suffixes():
+    # every column of a stream maps to the same stream; tone stands alone.
+    assert features.stream_of("sp500_close") == "sp500"
+    assert features.stream_of("sp500_ret") == "sp500"
+    assert features.stream_of("sp500_ma21") == "sp500"
+    assert features.stream_of("sp500_vol21") == "sp500"
+    assert features.stream_of("tone") == "tone"
+
+
 def test_build_features_joins_streams_and_targets_tone():
     # day0 primes pct_change (a stream's first-ever row has no prior close, so
     # its `_ret` is NaN and the row gets dropped) — day0 isn't a tone date, so
@@ -25,8 +34,7 @@ def test_build_features_joins_streams_and_targets_tone():
     df = features.build_features(tone, prices)
 
     assert features.FEATURES == [
-        *(f"{n}_close" for n in features.TICKERS),
-        *(f"{n}_ret" for n in features.TICKERS),
+        f"{n}_{sfx}" for sfx in features.STREAM_SUFFIXES for n in features.TICKERS
     ]
     assert "tone" in features.COLUMNS and features.TARGET == "tone"
     assert features.TARGET == "tone"

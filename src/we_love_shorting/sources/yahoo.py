@@ -24,13 +24,9 @@ def fetch_prices(
     """
     import yfinance as yf
 
-    hist = yf.Ticker(symbol)
-    if start is not None:
-        log.info("yfinance fetch: %s (from %s)", symbol, start)
-        df = hist.history(start=start).reset_index()
-    else:
-        log.info("yfinance fetch: %s (%s)", symbol, period)
-        df = hist.history(period=period).reset_index()
+    window = {"start": start} if start is not None else {"period": period}
+    log.info("yfinance fetch: %s (%s)", symbol, start or period)
+    df = yf.Ticker(symbol).history(**window).reset_index()
     if df.empty:
         if start is not None:  # incremental: no new trading days -> not an error
             return pd.DataFrame(columns=["date", value_col])
@@ -38,6 +34,26 @@ def fetch_prices(
     df.columns = [c.lower() for c in df.columns]
     df["date"] = pd.to_datetime(df["date"]).dt.date
     return df[["date", "close"]].rename(columns={"close": value_col})
+
+
+def search_tickers(query: str, max_results: int = 8) -> list[dict[str, str]]:
+    """Free-text ticker search ("adverty" -> Adverty AB + its symbols) via
+    Yahoo's search endpoint. Returns [{"symbol", "name", "exchange"}, ...];
+    an empty list when nothing matches (a bare symbol typed here can still be
+    fetched directly with fetch_prices)."""
+    import yfinance as yf
+
+    log.info("yfinance search: %s", query)
+    quotes = yf.Search(query, max_results=max_results).quotes
+    return [
+        {
+            "symbol": q["symbol"],
+            "name": (q.get("shortname") or q.get("longname") or q["symbol"]).strip(),
+            "exchange": q.get("exchange", ""),
+        }
+        for q in quotes
+        if q.get("symbol")
+    ]
 
 
 def fetch_intraday_price(symbol: str, interval: str = "1m") -> pd.Series:
